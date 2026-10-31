@@ -1,53 +1,41 @@
 /**
- * Runtime polyfills for Hermes.
+ * Runtime capability guards for Hermes.
  *
- * The AI SDK relies on web streams and `structuredClone` when parsing streamed
- * provider responses. Hermes ships neither, and RN's bundled `fetch` buffers the
- * whole response, so chat streaming uses `expo/fetch` explicitly instead.
+ * Expo SDK 58 installs the Winter globals it needs (`fetch` from `expo/fetch`,
+ * `ReadableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`,
+ * `structuredClone`). These guards only fill gaps for runtimes that ship without
+ * them, and never replace a native implementation.
  *
- * Every assignment is guarded: on runtimes that already provide the API (web,
- * future Hermes versions) the native implementation wins. The globals are typed
- * as `unknown` so this file never fights the DOM lib declarations that
- * TypeScript already ships for these names.
+ * The AI SDK needs all of these when parsing streamed provider responses.
  */
 import { deserialize, serialize } from '@ungap/structured-clone';
-import {
-  ReadableStream,
-  TransformStream,
-  WritableStream,
-} from 'web-streams-polyfill';
 
-type EncoderStream = {
-  readonly readable: ReadableStream<Uint8Array>;
-  readonly writable: WritableStream<string>;
-};
+const mutableGlobals = globalThis as unknown as Record<string, unknown>;
 
-type DecoderStream = {
-  readonly readable: ReadableStream<string>;
-  readonly writable: WritableStream<Uint8Array>;
-};
-
-const mutableGlobals = globalThis as unknown as {
-  structuredClone?: unknown;
-  TextEncoderStream?: unknown;
-  TextDecoderStream?: unknown;
-};
-
-function installStructuredClone(): void {
-  if (typeof mutableGlobals.structuredClone === 'function') {
+function install(name: string, factory: () => unknown): void {
+  if (typeof mutableGlobals[name] === 'function') {
     return;
   }
-  mutableGlobals.structuredClone = <T>(value: T): T => deserialize(serialize(value));
+
+  mutableGlobals[name] = factory();
 }
 
-function installTextEncoderStream(): void {
-  if (typeof mutableGlobals.TextEncoderStream === 'function') {
-    return;
-  }
+install('structuredClone', () => {
+  return <T>(value: T): T => deserialize(serialize(value)) as T;
+});
 
+// Hermes lacks the async iterator symbol, which ReadableStream.prototype.values
+// and the AI SDK's stream consumers rely on.
+if (typeof Symbol.asyncIterator !== 'symbol') {
+  (Symbol as unknown as { asyncIterator: symbol }).asyncIterator = Symbol.for(
+    'Symbol.asyncIterator',
+  );
+}
+
+install('TextEncoderStream', () => {
   const encoder = new TextEncoder();
 
-  class PolyfilledTextEncoderStream implements EncoderStream {
+  return class PolyfilledTextEncoderStream {
     readonly readable: ReadableStream<Uint8Array>;
     readonly writable: WritableStream<string>;
 
@@ -57,22 +45,17 @@ function installTextEncoderStream(): void {
           controller.enqueue(encoder.encode(chunk));
         },
       });
+
       this.readable = stream.readable;
       this.writable = stream.writable;
     }
-  }
+  };
+});
 
-  mutableGlobals.TextEncoderStream = PolyfilledTextEncoderStream;
-}
-
-function installTextDecoderStream(): void {
-  if (typeof mutableGlobals.TextDecoderStream === 'function') {
-    return;
-  }
-
+install('TextDecoderStream', () => {
   const decoder = new TextDecoder();
 
-  class PolyfilledTextDecoderStream implements DecoderStream {
+  return class PolyfilledTextDecoderStream {
     readonly readable: ReadableStream<string>;
     readonly writable: WritableStream<Uint8Array>;
 
@@ -82,16 +65,11 @@ function installTextDecoderStream(): void {
           controller.enqueue(decoder.decode(chunk));
         },
       });
+
       this.readable = stream.readable;
       this.writable = stream.writable;
     }
-  }
-
-  mutableGlobals.TextDecoderStream = PolyfilledTextDecoderStream;
-}
-
-installStructuredClone();
-installTextEncoderStream();
-installTextDecoderStream();
+  };
+});
 
 export {};

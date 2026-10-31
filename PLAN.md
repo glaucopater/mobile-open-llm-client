@@ -57,10 +57,13 @@ src/
    **Status: toolchain done** — Yarn 4.13 + node-modules linker, SDK 58 scaffold with Expo Router, strict TS, flat eslint config, jest on `@react-native/jest-preset`, CI workflow. `typecheck`, `lint`, `test` (3 passing), `expo-doctor` (20/20) and `expo export --platform ios` (1150 modules) all pass. Native boot not verified: no Android emulator run yet on this host, iOS needs macOS or an EAS build.
 2. **Streaming chat** — `useChat` + `DefaultChatTransport({ fetch: expoFetch })`, OpenAI-compatible provider pointed at a remote endpoint and a local server, polyfills wired in.
    *Done when tokens render incrementally on both platforms.*
+    **Status: code landed, device-unverified** — `useChat` + `DirectChatTransport({ agent })` (no HTTP route), `expo/fetch` behind `src/core/http.ts`, dialect providers, the context-window guard in `src/core/context.ts`, and the chat UI in `src/app/index.tsx`.
 3. **Multi-dialect + settings** — Anthropic and Gemini adapters behind the registry, SecureStore key storage, per-provider base-URL profiles, model catalog with capability badges, per-turn token/cost readout.
    *Done when switching OpenAI ↔ Anthropic ↔ Gemini requires no UI change.*
+    **Status: code landed, device-unverified** — Anthropic + Gemini + `openai-compatible` adapters behind one registry, SecureStore keys (`src/core/keys.ts`), and editable base URL / model id / context window / capability chips in `src/app/settings.tsx`.
 4. **Agent loop + device tools** — tool calling verified per dialect (parallel-tool behaviour differs between OpenAI and Anthropic), approval sheet, tool-call cards with input/output/errors, trace inspector.
    *Done when "save a note to a file and read it back" completes across tool rounds.*
+    **Status: code landed, device-unverified** — `ToolLoopAgent` with `isStepCount(MAX_STEPS)`, device tools (`get_device_info`, sandboxed `read_file` / `write_file` under `Paths.document`), tool cards per step in the transcript. Approval sheet and trace inspector not built yet.
 5. **Persistence + resilience** — session list, reload after app kill, partial assistant messages saved on abort, JSON export/import.
    *Done when an interrupted stream is recoverable.*
 6. **Local/on-device tier** — `@react-native-ai/llama` + `llama.rn` GGUF download manager (HuggingFace, progress, storage budget), GPU-layer detection with CPU fallback, Apple Foundation Models and ADK Gemini Nano as zero-download built-ins, capability-gated offline mode.
@@ -71,6 +74,7 @@ src/
 - **Streaming**: always `expo/fetch`, never the default fetch (it buffers). AI SDK on RN needs `structuredClone` and `TextEncoderStream`/`TextDecoderStream` polyfills; `web-streams` warnings are known and harmless.
 - **Local servers**: Android emulator cannot reach host `localhost` → use `10.0.2.2` or `adb reverse`; iOS simulator uses `localhost`. Android needs cleartext HTTP enabled for LAN servers.
 - **iOS builds** require a macOS host. This machine is Windows, so iOS verification is deferred unless a Mac is available or EAS cloud builds are used.
+- **Windows native builds**: `react-native-worklets` compiles C++ into CMake object paths longer than 260 chars, which ninja 1.10.2 (bundled with SDK `cmake;3.22.1`) cannot create — it fails with `mkdir(...): No such file or directory`. Fixed on this host by installing `cmake;3.31.6` (ninja 1.12.1) and uninstalling `cmake;3.22.1`; deleting the stale `node_modules/*/android/.cxx` directories forces CMake to reconfigure against the new toolchain. `eas build` is unaffected.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.
 
 ## Open questions

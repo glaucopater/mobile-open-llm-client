@@ -1,3 +1,13 @@
+# SUPER RULES
+
+- Never delete files if not asked
+- Never write or modify files outside this repo
+- Never perform destructive git commands like git rm or git rebase
+- Never assume, ask
+- Better safe than sorry
+- Check periodically the available context, if is close to the limit, compact
+
+
 This is an Expo/React Native mobile application. Prioritize mobile-first patterns, performance, and cross-platform compatibility.
 
 ## Expo has changed — do not trust your training data
