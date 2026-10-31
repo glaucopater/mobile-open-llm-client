@@ -72,12 +72,13 @@ src/
 ## Constraints to respect from day 1
 - **RN 0.88 removals**: no `InteractionManager` (use `requestIdleCallback`), no `Touchable` root export, no `NativeMethods` types, no `ImageBackground` (use a `View` with an absolutely positioned `Image`); refs typed as `ViewInstance` / `TextInputInstance`.
 - **Streaming**: always `expo/fetch`, never the default fetch (it buffers). AI SDK on RN needs `structuredClone` and `TextEncoderStream`/`TextDecoderStream` polyfills; `web-streams` warnings are known and harmless.
-- **Local servers**: Android emulator cannot reach host `localhost` → use `10.0.2.2` or `adb reverse`; iOS simulator uses `localhost`. Android needs cleartext HTTP enabled for LAN servers.
+- **Local servers**: Android emulator cannot reach host `localhost` → use `10.0.2.2` or `adb reverse`; iOS simulator uses `localhost`. Android needs cleartext HTTP enabled for LAN servers — debug builds get it from the generated debug manifest, release builds from the `plugins/android-cleartext` config plugin registered in `app.json`.
 - **iOS builds** require a macOS host. This machine is Windows, so iOS verification is deferred unless a Mac is available or EAS cloud builds are used.
 - **Windows native builds**: `react-native-worklets` compiles C++ into CMake object paths longer than 260 chars, which ninja 1.10.2 (bundled with SDK `cmake;3.22.1`) cannot create — it fails with `mkdir(...): No such file or directory`. Fixed on this host by installing `cmake;3.31.6` (ninja 1.12.1) and uninstalling `cmake;3.22.1`; deleting the stale `node_modules/*/android/.cxx` directories forces CMake to reconfigure against the new toolchain. `eas build` is unaffected.
+- **Standalone APK (no dev server)**: `npx expo prebuild --platform android` then `android/gradlew assembleRelease --max-workers=1` embeds the Hermes bundle, so the release APK boots without Metro and without the dev-launcher menu. The template signs release with the debug keystore, which is fine for sideloading to your own devices; use `eas build --profile production` for a distributable build.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.
 
 ## Open questions
-- App name / bundle identifier and repository license.
+- ~~App name / bundle identifier and repository license~~ — settled: MIT license (the Expo template's MIT `LICENSE` is kept, `package.json` declares `license: MIT`), app stays "Open LLM Client" / `com.flagg.mobileopenllmclient`.
 - Whether phase 6 on-device inference is in scope for the first release or a later one.
 - Whether a self-hosted proxy mode should ever replace direct device-side keys.

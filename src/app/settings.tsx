@@ -155,8 +155,9 @@ export default function SettingsScreen() {
         <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query. Test
         connection probes the endpoint with the typed key without storing it. The context window you
         set here is what the request guard budgets against — set it to the server&apos;s ctx size. For
-        a LAN server from the emulator run <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>,
-        or bind the server to 0.0.0.0 and use the host&apos;s LAN address. The provider catalog comes
+        a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
+        address, or tunnel the port with <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>
+        (emulator, or a real phone over USB). The provider catalog comes
         from models.dev and is refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
       </Text>
     </ScrollView>
