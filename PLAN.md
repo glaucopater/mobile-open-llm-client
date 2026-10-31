@@ -10,18 +10,24 @@ servers through OpenAI / Anthropic / Gemini dialects.
 - **Keys**: stored on device in `expo-secure-store`; the app calls providers directly (personal/local-first app; the exposure risk is documented in the README).
 - **Tools in first working version**: core device tools. On-device inference (`llama.rn`, Apple Foundation Models, Android ADK Gemini Nano) is a later phase behind the same provider registry.
 
-## Prerequisite (do this first)
-This machine's Volta shims are broken: `npm`, `npx`, and `pnpm` fail with missing corepack/Volta modules; only `yarn 4.13` works. Node is 22.21.1 (Expo 58 requires ≥22.13 ✓). Repair one package manager before scaffolding: `corepack enable`, or `volta install npm`, or install `bun`.
+## Prerequisite (done)
+This machine's Volta shims are broken: `npm`, `npx`, and `pnpm` fail with missing corepack/Volta modules; only `yarn 4.13` works. Node is 22.21.1 (Expo 58 requires ≥22.13 ✓). **Decision: the project uses Yarn 4.13** (`packageManager` in `package.json`, `nodeLinker: node-modules` in `.yarnrc.yml` — the linker name is `node-modules`, not `node_modules`). Run Expo CLI as `yarn expo <command>`.
 
 ## Dependencies
 ```
-expo@^58, react-native@0.88, react@19.3, typescript, zod@4
+expo@~58, react-native@0.88, react@19.3, react-dom@19.3 (expo-router's web peer), typescript, zod@4
 ai, @ai-sdk/react, @ai-sdk/openai, @ai-sdk/anthropic, @ai-sdk/google, @ai-sdk/openai-compatible
-@ungap/structured-clone, @stardazed/streams-text-encoding    # AI SDK polyfills for RN
-expo-router, expo-secure-store, expo-sqlite, expo-file-system,
-expo-notifications, expo-device, react-native-blob-util,
-zustand, react-native-markdown-display
-dev: @react-native/jest-preset, jest, eslint, expo-doctor, maestro
+@ungap/structured-clone, web-streams-polyfill   # AI SDK polyfills for Hermes
+expo-router, expo-constants, expo-linking, expo-secure-store, expo-sqlite,
+expo-file-system, expo-notifications, expo-device,
+react-native-safe-area-context, react-native-screens,
+react-native-gesture-handler, react-native-reanimated, react-native-worklets,
+zustand
+dev: @babel/core@7 (Expo pins 7.x; babel 8 breaks the preset), @react-native/metro-config,
+     @react-native/jest-preset, jest, eslint, eslint-config-expo, expo-doctor,
+     @types/ungap__structured-clone, maestro (later)
+not installed yet: react-native-blob-util (phase 4), react-native-markdown-display
+    (its peer set conflicts with expo-router's web deps — revisit per phase)
 later phase: @react-native-ai/llama + llama.rn, @react-native-ai/apple, @react-native-ai/adk
 ```
 
@@ -48,6 +54,7 @@ src/
 ## Phases and acceptance criteria
 1. **Env + scaffold** — repair package manager, `create-expo-app` on SDK 58, dev build scripts, strict TS, eslint, jest, CI running `typecheck + test + expo-doctor`.
    *Done when `expo run:android` and `expo run:ios` boot a blank screen on emulator and simulator.*
+   **Status: toolchain done** — Yarn 4.13 + node-modules linker, SDK 58 scaffold with Expo Router, strict TS, flat eslint config, jest on `@react-native/jest-preset`, CI workflow. `typecheck`, `lint`, `test` (3 passing), `expo-doctor` (20/20) and `expo export --platform ios` (1150 modules) all pass. Native boot not verified: no Android emulator run yet on this host, iOS needs macOS or an EAS build.
 2. **Streaming chat** — `useChat` + `DefaultChatTransport({ fetch: expoFetch })`, OpenAI-compatible provider pointed at a remote endpoint and a local server, polyfills wired in.
    *Done when tokens render incrementally on both platforms.*
 3. **Multi-dialect + settings** — Anthropic and Gemini adapters behind the registry, SecureStore key storage, per-provider base-URL profiles, model catalog with capability badges, per-turn token/cost readout.
