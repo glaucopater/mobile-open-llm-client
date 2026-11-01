@@ -1,7 +1,10 @@
+import { Link } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { TextInputInstance } from 'react-native';
 
+import { AppHeader } from '../components/AppHeader';
 import { describeConnection, testModelConnection, type ConnectionTest } from '../core/agent';
 import { budgetFor } from '../core/context';
 import {
@@ -24,6 +27,7 @@ import {
 } from '../core/model';
 import type { CatalogProvider } from '../core/provider-catalog';
 import { useKeyboardAwareScroll } from '../hooks/useKeyboardAwareScroll';
+import { useKeyboardPadding } from '../hooks/useKeyboardPadding';
 import { LOCAL_SERVER_DEFAULT_BASE_URL, useConfig } from '../store/config';
 import { theme } from '../theme';
 
@@ -48,6 +52,10 @@ export default function SettingsScreen() {
   const createProfile = useConfig((state) => state.createProfile);
   const removeModel = useConfig((state) => state.removeModel);
   const { scrollRef, onScroll, reveal } = useKeyboardAwareScroll();
+  const keyboardPadding = useKeyboardPadding();
+  // See the chat screen: the keyboard also covers the navigation bar, which
+  // `endCoordinates.height` leaves out, so the inset is padded on top of it.
+  const insets = useSafeAreaInsets();
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const editing = models.find((model) => model.id === editingId);
@@ -85,122 +93,136 @@ export default function SettingsScreen() {
   };
 
   return (
-    <ScrollView
-      ref={scrollRef}
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      keyboardShouldPersistTaps="handled"
-      automaticallyAdjustKeyboardInsets
-      onScroll={onScroll}
-      scrollEventThrottle={16}
+    // Android draws edge-to-edge since SDK 53, so the window is never resized by
+    // the keyboard: the viewport has to be padded by the keyboard height itself,
+    // and `reveal` scrolls the focused field into that smaller box.
+    <View
+      style={StyleSheet.compose(styles.container, { paddingBottom: keyboardPadding + insets.bottom })}
     >
-      <Text style={styles.section}>Models</Text>
+      <AppHeader
+        label="Settings"
+        actions={
+          <Link href="/" style={styles.headerAction}>
+            Chat
+          </Link>
+        }
+      />
+      <ScrollView
+        ref={scrollRef}
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+      >
+        <Text style={styles.section}>Models</Text>
 
-      {models.map((model) => (
-        <View key={model.id} style={styles.row}>
+        {models.map((model) => (
+          <View key={model.id} style={styles.row}>
+            <Pressable
+              onPress={() => select(model.id)}
+              style={({ pressed }) => [styles.rowMain, pressed ? styles.pressed : undefined]}
+              accessibilityRole="button"
+              accessibilityLabel={`Use ${model.label} for chat`}
+            >
+              <Text style={styles.label}>{model.label}</Text>
+              <Text style={styles.note}>
+                {model.dialect} · {model.modelId} · ctx {model.contextWindow ?? 'unset'}
+              </Text>
+              <Text style={styles.note}>{endpointPreview(model)}</Text>
+              {model.id === selectedId ? <Text style={styles.selected}>selected for chat</Text> : null}
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setPickerOpen(false);
+                setEditingId(model.id);
+              }}
+              style={({ pressed }) => [styles.editButton, pressed ? styles.pressed : undefined]}
+              accessibilityRole="button"
+              accessibilityLabel={`Edit ${model.label}`}
+            >
+              <Text style={styles.editText}>Edit</Text>
+            </Pressable>
+          </View>
+        ))}
+
+        <View style={styles.buttonRow}>
           <Pressable
-            onPress={() => select(model.id)}
-            style={({ pressed }) => [styles.rowMain, pressed ? styles.pressed : undefined]}
+            style={({ pressed }) => [styles.primaryButton, pressed ? styles.primaryPressed : undefined]}
+            onPress={() => setPickerOpen((open) => !open)}
             accessibilityRole="button"
-            accessibilityLabel={`Use ${model.label} for chat`}
           >
-            <Text style={styles.label}>{model.label}</Text>
-            <Text style={styles.note}>
-              {model.dialect} · {model.modelId} · ctx {model.contextWindow ?? 'unset'}
+            <Text style={styles.primaryButtonText}>
+              {pickerOpen ? 'Close provider list' : 'Add provider from catalog'}
             </Text>
-            <Text style={styles.note}>{endpointPreview(model)}</Text>
-            {model.id === selectedId ? <Text style={styles.selected}>selected for chat</Text> : null}
           </Pressable>
           <Pressable
-            onPress={() => {
-              setPickerOpen(false);
-              setEditingId(model.id);
-            }}
-            style={({ pressed }) => [styles.editButton, pressed ? styles.pressed : undefined]}
+            style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+            onPress={addRemoteProvider}
             accessibilityRole="button"
-            accessibilityLabel={`Edit ${model.label}`}
           >
-            <Text style={styles.editText}>Edit</Text>
+            <Text style={styles.secondaryButtonText}>Blank remote</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+            onPress={addLocalServer}
+            accessibilityRole="button"
+          >
+            <Text style={styles.secondaryButtonText}>Add LAN server</Text>
           </Pressable>
         </View>
-      ))}
 
-      <View style={styles.buttonRow}>
-        <Pressable
-          style={({ pressed }) => [styles.primaryButton, pressed ? styles.primaryPressed : undefined]}
-          onPress={() => setPickerOpen((open) => !open)}
-          accessibilityRole="button"
-        >
-          <Text style={styles.primaryButtonText}>
-            {pickerOpen ? 'Close provider list' : 'Add provider from catalog'}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
-          onPress={addRemoteProvider}
-          accessibilityRole="button"
-        >
-          <Text style={styles.secondaryButtonText}>Blank remote</Text>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
-          onPress={addLocalServer}
-          accessibilityRole="button"
-        >
-          <Text style={styles.secondaryButtonText}>Add LAN server</Text>
-        </Pressable>
-      </View>
-
-      {pickerOpen ? (
-        <ProviderPicker
-          query={query}
-          onQueryChange={setQuery}
-          onPick={addFromCatalog}
-          reveal={reveal}
-        />
-      ) : null}
-
-      {editing !== undefined ? (
-        <>
-          {/* Remount per profile: the editor's fields are local state seeded from
-              the model, and must not leak the previous profile's values. */}
-          <ModelEditor
-            key={editing.id}
-            model={editing}
+        {pickerOpen ? (
+          <ProviderPicker
+            query={query}
+            onQueryChange={setQuery}
+            onPick={addFromCatalog}
             reveal={reveal}
-            onSave={(patch) => {
-              useConfig.getState().updateModel(editing.id, patch);
-              setEditingId(null);
-            }}
-            onCancel={() => setEditingId(null)}
           />
-          <Pressable
-            style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
-            onPress={() => {
-              removeModel(editing.id);
-              setEditingId(null);
-            }}
-            accessibilityRole="button"
-          >
-            <Text style={styles.dangerButtonText}>Delete this model</Text>
-          </Pressable>
-        </>
-      ) : null}
+        ) : null}
 
-      <Text style={styles.footer}>
-        Keys are kept in SecureStore (in the web dev build, unencrypted localStorage), never in
-        SQLite. Auth follows the dialect: OpenAI-style dialects send{' '}
-        <Text style={styles.code}>Authorization: Bearer</Text>, Anthropic sends{' '}
-        <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query. Test
-        connection probes the endpoint with the typed key without storing it. The context window you
-        set here is what the request guard budgets against — set it to the server&apos;s ctx size. For
-        a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
-        address, or tunnel the port with{' '}
-        <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>{' '}
-        (emulator, or a real phone over USB). The provider catalog comes from models.dev and is
-        refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
-      </Text>
-    </ScrollView>
+        {editing !== undefined ? (
+          <>
+            {/* Remount per profile: the editor's fields are local state seeded from
+                the model, and must not leak the previous profile's values. */}
+            <ModelEditor
+              key={editing.id}
+              model={editing}
+              reveal={reveal}
+              onSave={(patch) => {
+                useConfig.getState().updateModel(editing.id, patch);
+                setEditingId(null);
+              }}
+              onCancel={() => setEditingId(null)}
+            />
+            <Pressable
+              style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
+              onPress={() => {
+                removeModel(editing.id);
+                setEditingId(null);
+              }}
+              accessibilityRole="button"
+            >
+              <Text style={styles.dangerButtonText}>Delete this model</Text>
+            </Pressable>
+          </>
+        ) : null}
+
+        <Text style={styles.footer}>
+          Keys are kept in SecureStore (in the web dev build, unencrypted localStorage), never in
+          SQLite. Auth follows the dialect: OpenAI-style dialects send{' '}
+          <Text style={styles.code}>Authorization: Bearer</Text>, Anthropic sends{' '}
+          <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query. Test
+          connection probes the endpoint with the typed key without storing it. The context window you
+          set here is what the request guard budgets against — set it to the server&apos;s ctx size. For
+          a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
+          address, or tunnel the port with{' '}
+          <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>{' '}
+          (emulator, or a real phone over USB). The provider catalog comes from models.dev and is
+          refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
+        </Text>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -685,6 +707,19 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: theme.bg,
+  },
+  scroll: {
+    flex: 1,
+  },
+  /** Back to chat; the navigator header is off, so this is the only way out. */
+  headerAction: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   content: {
     padding: 16,

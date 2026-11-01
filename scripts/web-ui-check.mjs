@@ -25,7 +25,7 @@ const EDGE_CANDIDATES = [
 function parseArgs(argv) {
   const options = {
     route: '/',
-    out: 'web-check.png',
+    out: join(process.env.TEMP ?? '/tmp', 'web-check.png'),
     type: null,
     clickText: null,
     settle: 1500,

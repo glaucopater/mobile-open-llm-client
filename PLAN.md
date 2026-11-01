@@ -37,6 +37,7 @@ web dev target: react-native-web@0.21, @expo/metro-runtime (npx expo install)
 yarn web        # expo start --web, app at http://localhost:8081
 yarn web:check  # node scripts/web-ui-check.mjs <route> --out=<png> [--type=<text>] [--click-text=<label>]
                 # drives headless Edge over CDP: waits for mount, dumps console, phone-sized shot
+                # default --out is $TMP/web-check.png, so the repo stays clean
 
 Limits found by running it, not assumed:
 - expo-sqlite cannot run on web: its WASM worker is fetched from
@@ -52,7 +53,50 @@ Limits found by running it, not assumed:
   verified on a real device; the web view verifies layout, contrast and round trips.
 - LAN Ollama works from the browser at http://localhost:11434/v1 (Ollama allows the
   localhost origin by default), streaming and reasoning included.
+- Favicon: `app.json`'s `web.favicon` points at assets/favicon.png, and
+  `npx expo export --platform web` converts it into a real multi-size favicon.ico
+  (checked: ICO header 00 00 01 00, 3 entries at 16x16) plus
+  `<link rel="icon" href="/favicon.ico">` in dist/index.html. The dev server does NOT
+  inject that link, so the tab icon is blank while `yarn web` runs — expected, not a
+  broken asset.
 ```
+
+## Version and on-device checks
+
+```
+yarn bump          # 1.0.0 -> 1.1.0 (minor bump; --patch for 1.0.1, --dry-run to preview)
+                   # writes package.json, app.json expo.version, app.json expo.android.versionCode
+                   # and src/version.ts APP_VERSION in one go; src/__tests__/version.test.ts
+                   # fails if the three ever drift apart
+npx expo prebuild --platform android --no-install   # versionCode only reaches the APK here
+yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the installed APK
+                   # [--device=<serial>] [--only=<name>] [--shots=<dir>] [--wait=<ms>] [--trace]
+                   # --trace prints every tap and the labelled nodes of each dump
+```
+
+- **Version in the UI**: every screen renders `AppHeader` (icon + `Open LLM Client` +
+  `v<version>` + that screen's actions) instead of the navigator header
+  (`headerShown: false`), so the bar pads itself against the status bar inset — nothing
+  else reserves that space once the header is gone. `src/version.ts` is the display
+  source; `scripts/bump-version.mjs` is the only writer.
+- **Device e2e**: taps are driven by `adb shell input`, and what is asserted is what the
+  system drew: `uiautomator` bounds for the composer and Settings fields, the keyboard's
+  top edge from `dumpsys window` (`mType=ime` → `mInsetsHint` bottom, keyboard top =
+  display height − inset), and keyboard visibility from `dumpsys input_method`
+  (`mInputViewStarted`). The crash buffer (`logcat -b crash`) is checked last. Screenshots
+  per check land in the temp dir. This is the only place the keyboard behaviour can be
+  verified — react-native-web emits no keyboard events, and unit tests cannot see whether
+  a view sits behind the IME. Current run on the phone (v1.2.0, versionCode 3): 9/9.
+- **Device e2e pitfalls, learned by running it**: a single fixed wait after a tap is too
+  short, so checks poll the dump (`waitFor`) instead of sleeping once; `uiautomator` only
+  reports nodes that are visible, so content below the fold needs a swipe (`scrollDown`,
+  used by `settings-field-reveal`); `--only=<name>` must not depend on a navigation done by
+  an earlier check, hence `gotoSettings`/`gotoChat`; and `tap()` accepts a coordinate pair,
+  a point or a node, because passing a point to an `(x, y)` signature sent `NaN NaN`, which
+  `adb` ignored — every Settings check then failed against the Chat screen; and `adb install`
+  leaves a notification that can leave the shade open, so `launch` broadcasts
+  `CLOSE_SYSTEM_DIALOGS` and retries, otherwise `mCurrentFocus` stays `NotificationShade`
+  and no check can see the app.
 
 ## Architecture
 ```
@@ -99,6 +143,13 @@ src/
 - **iOS builds** require a macOS host. This machine is Windows, so iOS verification is deferred unless a Mac is available or EAS cloud builds are used.
 - **Windows native builds**: `react-native-worklets` compiles C++ into CMake object paths longer than 260 chars, which ninja 1.10.2 (bundled with SDK `cmake;3.22.1`) cannot create — it fails with `mkdir(...): No such file or directory`. Fixed on this host by installing `cmake;3.31.6` (ninja 1.12.1) and uninstalling `cmake;3.22.1`; deleting the stale `node_modules/*/android/.cxx` directories forces CMake to reconfigure against the new toolchain. `eas build` is unaffected.
 - **Standalone APK (no dev server)**: `npx expo prebuild --platform android` then `android/gradlew assembleRelease --max-workers=1` embeds the Hermes bundle, so the release APK boots without Metro and without the dev-launcher menu. The template signs release with the debug keystore, which is fine for sideloading to your own devices; use `eas build --profile production` for a distributable build.
+- **One ABI**: the `expo-build-properties` plugin in `app.json` sets `android.buildArchs: ["arm64-v8a"]`, which prebuild writes into `android/gradle.properties` as `reactNativeArchitectures=arm64-v8a`. The phone is arm64-v8a, so the other three ABIs were dead weight: measured here, the release APK went from 101 MB to 34.5 MB and `assembleRelease` from 13m to 8m22s. `buildArchs` is **not** an `ExpoConfig` key — putting it under `android` in `app.json` is silently ignored, and `gradle.properties` keeps all four ABIs (`armeabi-v7a,arm64-v8a,x8,x86_64`). Re-add `x86_64` there if an emulator is ever needed.
+- **Edge-to-edge keyboard on Android**: SDK 53+ draws edge-to-edge, which makes `windowSoftInputMode="adjustResize"` a no-op — the keyboard overlays the window instead of shrinking it, so the Expo docs' `behavior: undefined` on Android leaves the composer covered. `KeyboardAvoidingView behavior="padding"` is *also* wrong here: RN's native payload reports `screenY` as the visible-frame bottom (`ReactRootView.checkForKeyboardEvents`), which only equals the keyboard's top after a resize, so KAV under-pads by about the system-bar height. Measured on the phone: keyboard top y=1529, IME inset 883px, composer bottom still y=1770. Both screens therefore pad by `endCoordinates.height` + the safe-area bottom inset (`src/hooks/useKeyboardPadding.ts`; the height is the IME inset *minus* the system bars, while the keyboard also covers the nav bar, which left the composer 31px short), and `useKeyboardAwareScroll` reveals focused fields inside the padded viewport. Verified with `yarn device:e2e` bounds, not by trusting the docs.
+- **App icon**: `assets/icon.png`, `splash-icon.png`, the three `android-icon-*.png` adaptive layers and `favicon.png` are custom (chat bubble + LAN link mark in `theme.accent` #0B5C86 on white); `app.json`'s `adaptiveIcon.backgroundColor` is `#FFFFFF`. The layers are drawn with GDI+ — every shape is a filled path (ring, capsule spokes, dot ellipses), because `System.Drawing.Drawing2D.Pen` does not resolve under PowerShell. Changing the art means re-running the generator and re-prebuilding: icons are native resources, so a JS-only update does not show in the launcher.
+- **Composer is a floating card**: rounded, inset 12dp from the screen edges, bordered
+  (`theme.borderStrong`) with a soft shadow, lifted clear of the keyboard by the
+  container's padding. `device:e2e` asserts the inset (`composer-card`) and that its
+  bottom lands above the keyboard (`keyboard-composer`).
 - **Phone install without a cable**: Developer options → Wireless debugging → `adb pair <ip>:<pairingPort> <code>`; adb then discovers the connect endpoint over mDNS (`adb mdns services`), so no port needs to be typed. Release builds are not debuggable, so `adb shell run-as` cannot inspect app files — verify file tools through the model instead.
 - **LAN servers on a real phone**: bind the server to `0.0.0.0` and set the profile's base URL to the host's LAN address (the phone has no `adb reverse` equivalent once wireless adb drops). Windows' firewall app rules decide whether the phone may connect; check `Get-NetFirewallRule -DisplayName '<server>'`.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.

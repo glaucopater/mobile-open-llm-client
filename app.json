@@ -3,7 +3,7 @@
     "name": "Open LLM Client",
     "slug": "mobile-open-llm-client",
     "scheme": "mobile-open-llm-client",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -12,13 +12,14 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FFFFFF",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.flagg.mobileopenllmclient"
+      "package": "com.flagg.mobileopenllmclient",
+      "versionCode": 3
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -27,6 +28,14 @@
       "expo-router",
       "expo-secure-store",
       "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "buildArchs": ["arm64-v8a"]
+          }
+        }
+      ],
       "./plugins/android-cleartext"
     ],
     "experiments": {

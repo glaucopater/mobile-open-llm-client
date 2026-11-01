@@ -1,11 +1,14 @@
 /**
  * Scrolls a focused `TextInput` above the keyboard inside a `ScrollView`.
  *
- * Android resizes the window (`windowSoftInputMode="adjustResize"`), but React
- * Native never scrolls to the focused field, so fields near the bottom of a
- * long form end up hidden behind the keyboard. Measuring in window
- * coordinates avoids tracking layout offsets through nested containers: the
- * field and the scroll viewport are compared where they are actually drawn.
+ * React Native never scrolls to the focused field, so fields near the bottom of
+ * a long form end up hidden behind the keyboard. Android draws edge-to-edge
+ * since SDK 53, which means `windowSoftInputMode="adjustResize"` no longer
+ * shrinks the window: the caller has to pad the viewport itself
+ * (`useKeyboardPadding`) so this hook measures against the keyboard instead of
+ * the screen edge. Measuring in window coordinates avoids tracking layout
+ * offsets through nested containers: the field and the scroll viewport are
+ * compared where they are actually drawn.
  */
 import { useCallback, useEffect, useRef } from 'react';
 import type { ScrollViewInstance } from 'react-native';

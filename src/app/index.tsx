@@ -4,21 +4,22 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { UIMessage } from 'ai';
 
+import { AppHeader } from '../components/AppHeader';
 import { ChatMessage } from '../components/ChatMessage';
 import { budgetFor } from '../core/context';
 import { keyIsStored } from '../core/keys';
 import type { ModelDescriptor } from '../core/model';
 import { useAgentChat } from '../hooks/useAgentChat';
+import { useKeyboardPadding } from '../hooks/useKeyboardPadding';
 import { useConfig } from '../store/config';
 import { theme } from '../theme';
 
@@ -76,22 +77,39 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
   const busy = status === 'streaming' || status === 'submitted';
   const budget = budgetFor(model.contextWindow);
   const sendDisabled = !busy && draft.trim().length === 0;
+  const keyboardPadding = useKeyboardPadding();
+  // `endCoordinates.height` is the IME inset minus the system bars, but the
+  // keyboard covers the navigation bar too, so the bar's own inset has to be
+  // padded as well — otherwise the composer ends up inset-height behind the
+  // keys (measured on the phone: 31px short, matching the nav bar inset).
+  const insets = useSafeAreaInsets();
+
+  const scrollToBottom = (animated: boolean) => {
+    listRef.current?.scrollToEnd({ animated });
+  };
 
   useEffect(() => {
-    listRef.current?.scrollToEnd({ animated: true });
+    scrollToBottom(true);
   }, [messages.length]);
 
-  // The keyboard shrinks the list (adjustResize on Android, padding on iOS), so
-  // the newest turn has to be re-scrolled into the smaller viewport.
+  // The keyboard pads the container (see `useKeyboardPadding`), so the newest
+  // turn has to be re-scrolled into the smaller viewport. The padding lands a
+  // frame after the event, hence the second pass.
   useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
+
     const shown = Keyboard.addListener('keyboardDidShow', () => {
-      listRef.current?.scrollToEnd({ animated: true });
+      scrollToBottom(false);
+      retry = setTimeout(() => scrollToBottom(false), 150);
     });
     const hidden = Keyboard.addListener('keyboardDidHide', () => {
-      listRef.current?.scrollToEnd({ animated: false });
+      scrollToBottom(false);
     });
 
     return () => {
+      if (retry !== undefined) {
+        clearTimeout(retry);
+      }
       shown.remove();
       hidden.remove();
     };
@@ -110,43 +128,46 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    <View
+      style={StyleSheet.compose(styles.container, { paddingBottom: keyboardPadding + insets.bottom })}
     >
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={styles.modelLabel}>{model.label}</Text>
-          <Text style={styles.budget}>
-            ctx {budget.contextWindow} · prompt ≤ {budget.inputBudget} · answer {budget.maxOutputTokens}
+      <AppHeader
+        label="Chat"
+        actions={
+          <>
+            {messages.length > 0 ? (
+              <Pressable
+                onPress={reset}
+                disabled={busy}
+                style={({ pressed }) => [
+                  styles.headerAction,
+                  pressed && !busy ? styles.headerActionPressed : undefined,
+                ]}
+                accessibilityRole="button"
+              >
+                <Text style={busy ? styles.headerActionDisabled : styles.headerActionText}>
+                  New chat
+                </Text>
+              </Pressable>
+            ) : null}
+            <Link href="/settings" style={[styles.headerAction, styles.settingsLink]}>
+              Settings
+            </Link>
+          </>
+        }
+      />
+
+      <View style={styles.modelRow}>
+        <Text style={styles.modelLabel}>{model.label}</Text>
+        <Text style={styles.budget}>
+          ctx {budget.contextWindow} · prompt ≤ {budget.inputBudget} · answer {budget.maxOutputTokens}
+        </Text>
+        {trim !== null && messages.length > 0 && (trim.droppedMessages > 0 || trim.clippedToolResults > 0) ? (
+          <Text style={styles.trimChip}>
+            trimmed {trim.droppedMessages} msgs · {trim.beforeTokens}→{trim.afterTokens} tok
+            {trim.clippedToolResults > 0 ? ` · ${trim.clippedToolResults} tool cut` : ''}
           </Text>
-          {trim !== null && messages.length > 0 && (trim.droppedMessages > 0 || trim.clippedToolResults > 0) ? (
-            <Text style={styles.trimChip}>
-              trimmed {trim.droppedMessages} msgs · {trim.beforeTokens}→{trim.afterTokens} tok
-              {trim.clippedToolResults > 0 ? ` · ${trim.clippedToolResults} tool cut` : ''}
-            </Text>
-          ) : null}
-        </View>
-        <View style={styles.headerActions}>
-          {messages.length > 0 ? (
-            <Pressable
-              onPress={reset}
-              disabled={busy}
-              style={({ pressed }) => [
-                styles.headerAction,
-                pressed && !busy ? styles.headerActionPressed : undefined,
-              ]}
-              accessibilityRole="button"
-            >
-              <Text style={busy ? styles.headerActionDisabled : styles.headerActionText}>
-                New chat
-              </Text>
-            </Pressable>
-          ) : null}
-          <Link href="/settings" style={[styles.headerAction, styles.settingsLink]}>
-            Settings
-          </Link>
-        </View>
+        ) : null}
       </View>
 
       <FlatList
@@ -197,7 +218,7 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
           </Text>
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -233,26 +254,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
+  /** Model + token budget, right under the app bar. */
+  modelRow: {
+    gap: 3,
     paddingHorizontal: 16,
-    paddingTop: 8,
+    paddingTop: 6,
     paddingBottom: 6,
-    backgroundColor: theme.bg,
     borderBottomWidth: 1,
     borderBottomColor: theme.border,
-  },
-  headerText: {
-    flex: 1,
-    gap: 3,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
   },
   // Touch target stays ≥44dp; the label is small but not faint.
   headerAction: {
@@ -317,14 +326,28 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  /**
+   * Floating card: rounded, inset from the screen edges, and lifted clear of the
+   * keyboard by the container's padding (`useKeyboardPadding` + the bottom inset).
+   * The hairline border was the old full-width row's divider; a card reads better
+   * against the transcript, so it gets a border plus a soft shadow instead.
+   */
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-    padding: 12,
-    backgroundColor: theme.bg,
-    borderTopWidth: 1,
-    borderTopColor: theme.border,
+    marginHorizontal: 12,
+    marginBottom: 10,
+    padding: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: theme.borderStrong,
+    backgroundColor: theme.card,
+    shadowColor: '#000000',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
   input: {
     flex: 1,

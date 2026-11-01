@@ -5520,6 +5520,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"expo-build-properties@npm:~58.0.12":
+  version: 58.0.12
+  resolution: "expo-build-properties@npm:58.0.12"
+  dependencies:
+    "@expo/schema-utils": "npm:^58.0.3"
+    resolve-from: "npm:^5.0.0"
+    semver: "npm:^7.7.4"
+  peerDependencies:
+    expo: "*"
+  checksum: 10c0/a1d0ccc688daf412d2b26538f6b799963136bfb6a5230c39fb9c679df2e13ec8fddf535af7fcabec566a696fb7495df53e1d1bb4e3374aa0b93e0d17bf8462e7
+  languageName: node
+  linkType: hard
+
 "expo-constants@npm:~58.0.14":
   version: 58.0.14
   resolution: "expo-constants@npm:58.0.14"
@@ -8611,6 +8624,7 @@ __metadata:
     eslint: "npm:^9.39.5"
     eslint-config-expo: "npm:^58.0.4"
     expo: "npm:~58.0.22"
+    expo-build-properties: "npm:~58.0.12"
     expo-constants: "npm:~58.0.14"
     expo-dev-client: "npm:~58.0.18"
     expo-device: "npm:~58.0.5"
