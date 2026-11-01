@@ -13,6 +13,12 @@ const mockGenerate = jest.fn(
 );
 const mockCreateOpenAI = jest.fn((settings: unknown) => settings);
 
+jest.mock('../store/db', () => ({
+  getJson: async () => ({ id: 'ses_test' }),
+  setJson: async () => {},
+  deleteKey: async () => {},
+}));
+
 jest.mock('ai', () => ({
   isStepCount: (steps: number) => ({ stopAfter: steps }),
   wrapLanguageModel: ({ model }: { model: unknown }) => ({ guarded: model }),

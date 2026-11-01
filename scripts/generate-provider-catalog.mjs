@@ -66,7 +66,18 @@ const NOTE = {
   azure: 'Replace YOUR-RESOURCE with your Azure OpenAI resource name.',
   perplexity: 'Chat Completions through the Orchestrator API; model ids look like `perplexity/kimi-k3`.',
   'perplexity-agent': 'Responses API (POST /v1/responses); web-grounded answers with citations.',
+  opencode:
+    'Console gateway, key from the OpenCode Console. Free models only answer inside OpenCode, so type a paid model id. The app sends the `x-opencode-session` header this gateway needs.',
+  'opencode-go':
+    'Go subscription key from the OpenCode Console. Free models only answer inside OpenCode (other clients get HTTP 403), so type a paid model id. The app sends the `x-opencode-session` header this gateway needs.',
 };
+
+/**
+ * Providers whose zero-cost models only answer from inside OpenCode
+ * (https://opencode.ai/v2/docs/console/harnesses). Suggesting one would hand the
+ * user a profile that gets `403`, so the suggestion picks a paid model instead.
+ */
+const PAID_ONLY_MODELS = new Set(['opencode', 'opencode-go']);
 
 /**
  * Local servers models.dev does not list. Their model list is whatever is
@@ -153,7 +164,7 @@ function capabilities(model) {
  * new profile does not spend much before the user picks a model. Providers whose
  * whole list is deprecated still get an entry, flagged in the note.
  */
-function pickModel(models) {
+function pickModel(models, { paidOnly = false } = {}) {
   const withIds = Object.values(models ?? {}).filter((model) => typeof model.id === 'string');
   const usable = withIds.filter((model) => model.status !== 'deprecated');
   const deprecated = usable.length === 0;
@@ -166,12 +177,14 @@ function pickModel(models) {
   const costOf = (model) => model.cost?.input ?? Number.POSITIVE_INFINITY;
   const contextOf = (model) => model.limit?.context ?? 0;
 
-  const candidates = pool.filter(
+  // A zero-cost model here would be answered 403 by a client outside OpenCode.
+  const priced = paidOnly ? pool.filter((model) => costOf(model) > 0) : pool;
+  const candidates = priced.filter(
     (model) => model.tool_call === true && contextOf(model) >= MIN_CONTEXT,
   );
   const shortlist = candidates.length > 0
     ? candidates
-    : pool.filter((model) => contextOf(model) >= FALLBACK_CONTEXT);
+    : priced.filter((model) => contextOf(model) >= FALLBACK_CONTEXT);
   const chosen = shortlist.length > 0 ? shortlist : pool;
 
   chosen.sort((a, b) => costOf(a) - costOf(b) || contextOf(b) - contextOf(a));
@@ -204,7 +217,7 @@ function toEntry(id, provider) {
     return undefined;
   }
 
-  const model = pickModel(provider.models);
+  const model = pickModel(provider.models, { paidOnly: PAID_ONLY_MODELS.has(id) });
 
   if (model === undefined) {
     return undefined;

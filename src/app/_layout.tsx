@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { primeKeyCache } from '../core/keys';
+import { loadConversationSessionId } from '../core/session';
 import { useConfig } from '../store/config';
 
 export default function RootLayout() {
@@ -15,6 +16,12 @@ export default function RootLayout() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Some gateways (OpenCode Go) refuse a request without a session id, so the
+  // id is read from SQLite before the first request rather than minted per call.
+  useEffect(() => {
+    void loadConversationSessionId();
+  }, []);
 
   useEffect(() => {
     void primeKeyCache(models.flatMap((model) => model.apiKeyRef ?? []));

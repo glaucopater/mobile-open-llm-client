@@ -204,6 +204,26 @@ src/
   bottom lands above the keyboard (`keyboard-composer`).
 - **Phone install without a cable**: Developer options → Wireless debugging → `adb pair <ip>:<pairingPort> <code>`; adb then discovers the connect endpoint over mDNS (`adb mdns services`), so no port needs to be typed. Release builds are not debuggable, so `adb shell run-as` cannot inspect app files — verify file tools through the model instead.
 - **LAN servers on a real phone**: bind the server to `0.0.0.0` and set the profile's base URL to the host's LAN address (the phone has no `adb reverse` equivalent once wireless adb drops). Windows' firewall app rules decide whether the phone may connect; check `Get-NetFirewallRule -DisplayName '<server>'`.
+- **OpenCode Go (default profile)**: the gateway answers `400 {"error":{"type":"MissingSessionID"}}` to
+  any Chat Completions request without `x-opencode-session`, and `401 Invalid credential` for a key that
+  is not a real OpenCode Console/Go subscription key (the free-tier models are OpenCode-only and return
+  `403` to other harnesses). `src/core/session.ts` mints one stable `ses_…` id, stores it in the kv table
+  so restarts keep the conversation identity, and `requestHeaders` in `src/core/provider.ts` sends it plus
+  a client `User-Agent` (`open-llm-client/<version>`) for any host under `opencode.ai`. Two defaults ship
+  for the two URLs of the same gateway — `https://opencode.ai/inference/go/openai/v1` (documented) and
+  `https://opencode.ai/zen/go/v1` (older alias) — both with model `deepseek-v4.1-flash` (1M ctx, tools +
+  vision + reasoning, $0.15/$0.60 per 1M tokens per models.dev) sharing one credential slot, so pasting
+  the key in Settings is all the phone needs. The catalog's `opencode` entry is the pay-as-you-go Console
+  gateway (`inference/openai/v1`), not the Go one.
+- **Built-in defaults reach installs that already saved a registry**: `load()` appends any `DEFAULT_MODELS`
+  profile whose id is missing, keeping user rows in their own order and their edits intact, and stores
+  `retiredDefaults` so a profile the user deleted is not resurrected. Web keeps the same row in
+  localStorage, so the merge is shared by both targets.
+- **CI needs Corepack before `actions/setup-node`**: `setup-node`'s `cache: yarn` step runs `yarn --version`
+  to build its cache key. With `corepack enable` only in a later step, the runner's global Yarn 1.22 answers
+  and the step dies on the `packageManager: yarn@4.13.0` mismatch in seconds — the job never reaches
+  `yarn install`. `corepack enable` is therefore the first step, and `COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'`
+  is set at job level so the pinned Yarn download is not gated on an interactive confirmation.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.
 
 ## Open questions

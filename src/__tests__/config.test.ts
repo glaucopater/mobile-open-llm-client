@@ -18,8 +18,12 @@ jest.mock('../store/db', () => ({
   },
 }));
 
-function stored(): { models: unknown[]; selectedId: string } {
-  return mockRows.get('model-registry') as { models: unknown[]; selectedId: string };
+function stored(): { models: unknown[]; selectedId: string; retiredDefaults?: string[] } {
+  return mockRows.get('model-registry') as {
+    models: unknown[];
+    selectedId: string;
+    retiredDefaults?: string[];
+  };
 }
 
 beforeEach(() => {
@@ -206,8 +210,10 @@ describe('load', () => {
       'openai:model-2',
       'compatible:gpt-5-mini',
       'compatible:claude-sonnet-4-5',
+      // The registry predates the built-ins, so they are appended after it.
+      ...DEFAULT_MODELS.map((model) => model.id),
     ]);
-    expect(models.map((model) => model.label)).toEqual([
+    expect(models.slice(0, 3).map((model) => model.label)).toEqual([
       'Ollama on LAN',
       'OpenAI GPT-5 Mini',
       'Anthropic',
@@ -222,6 +228,59 @@ describe('load', () => {
     await useConfig.getState().load();
 
     expect(useConfig.getState().selectedId).toBe(DEFAULT_MODELS[0].id);
+  });
+});
+
+describe('defaults added by a later build', () => {
+  const GO_ID = 'opencode-go:deepseek-v4.1-flash';
+
+  it('appends defaults a saved registry predates, leaving the user rows alone', async () => {
+    const mine: ModelDescriptor = {
+      id: 'compatible:qwen3.5:9b',
+      label: 'Ollama on LAN',
+      dialect: 'openai-compatible',
+      modelId: 'qwen3.5:9b',
+      baseUrl: 'http://192.168.178.87:11434/v1',
+      source: 'local-server',
+      capabilities: { tools: true, vision: true, reasoning: true },
+      contextWindow: 32768,
+    };
+
+    mockRows.set('model-registry', { models: [mine], selectedId: mine.id });
+
+    await useConfig.getState().load();
+
+    const models = useConfig.getState().models;
+
+    expect(models[0]).toEqual(mine);
+    expect(useConfig.getState().selectedId).toBe(mine.id);
+    expect(models.map((model) => model.id)).toEqual([
+      mine.id,
+      ...DEFAULT_MODELS.map((model) => model.id),
+    ]);
+    // Written back, so the new profile survives the next restart.
+    expect(stored().models).toEqual(models);
+  });
+
+  it('does not re-add a default the user deleted', async () => {
+    mockRows.set('model-registry', {
+      models: DEFAULT_MODELS.filter((model) => model.id !== GO_ID),
+      selectedId: DEFAULT_MODELS[0].id,
+      retiredDefaults: [GO_ID],
+    });
+
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().models.some((model) => model.id === GO_ID)).toBe(false);
+  });
+
+  it('retires a built-in that is deleted so a restart keeps it gone', async () => {
+    useConfig.getState().removeModel(GO_ID);
+
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().models.some((model) => model.id === GO_ID)).toBe(false);
+    expect(stored().retiredDefaults).toEqual([GO_ID]);
   });
 });
 

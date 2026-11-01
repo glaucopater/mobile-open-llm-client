@@ -2,8 +2,8 @@
  * App configuration store: the model registry plus the selected model.
  *
  * Non-secret config is persisted to SQLite; keys stay in SecureStore. Defaults
- * cover one remote provider per dialect plus a LAN local server, so the app is
- * usable before any profile is edited.
+ * cover one remote provider per dialect, a LAN local server and OpenCode Go, so
+ * the app is usable before any profile is edited.
  */
 import { create } from 'zustand';
 
@@ -33,6 +33,25 @@ const STORAGE_KEY = 'model-registry';
  */
 export const LOCAL_SERVER_DEFAULT_BASE_URL = 'http://localhost:11434/v1';
 
+/**
+ * OpenCode Go. Both URLs are the same gateway — `inference/go` is the documented
+ * base, `zen/go` the older alias — and both speak OpenAI Chat Completions.
+ * A request without `x-opencode-session` is answered `400 MissingSessionID`;
+ * `core/session.ts` adds that header and the app's own `User-Agent`.
+ */
+export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/inference/go/openai/v1';
+export const OPENCODE_GO_ZEN_BASE_URL = 'https://opencode.ai/zen/go/v1';
+
+/** One credential slot for both OpenCode Go endpoints. */
+export const OPENCODE_GO_API_KEY_REF = 'opencode-go-api-key';
+
+const OPENCODE_SESSION_NOTE =
+  'OpenCode Go needs a subscription key and sends a session id automatically (x-opencode-session).';
+
+/**
+ * Defaults are priced per 1k tokens, the same unit the generated catalog uses
+ * (models.dev lists per 1M, so the rates here are its values divided by 1000).
+ */
 export const DEFAULT_MODELS: ModelDescriptor[] = [
   {
     id: 'ollama:qwen3.5:9b',
@@ -43,6 +62,32 @@ export const DEFAULT_MODELS: ModelDescriptor[] = [
     source: 'local-server',
     capabilities: { tools: true, vision: true, reasoning: true },
     contextWindow: 32768,
+  },
+  {
+    id: 'opencode-go:deepseek-v4.1-flash',
+    label: 'OpenCode Go · DeepSeek V4.1 Flash',
+    dialect: 'openai-compatible',
+    modelId: 'deepseek-v4.1-flash',
+    baseUrl: OPENCODE_GO_BASE_URL,
+    apiKeyRef: OPENCODE_GO_API_KEY_REF,
+    source: 'remote',
+    capabilities: { tools: true, vision: true, reasoning: true },
+    contextWindow: 1_000_000,
+    pricing: { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    note: OPENCODE_SESSION_NOTE,
+  },
+  {
+    id: 'opencode-go-zen:deepseek-v4.1-flash',
+    label: 'OpenCode Go (zen alias) · DeepSeek V4.1 Flash',
+    dialect: 'openai-compatible',
+    modelId: 'deepseek-v4.1-flash',
+    baseUrl: OPENCODE_GO_ZEN_BASE_URL,
+    apiKeyRef: OPENCODE_GO_API_KEY_REF,
+    source: 'remote',
+    capabilities: { tools: true, vision: true, reasoning: true },
+    contextWindow: 1_000_000,
+    pricing: { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    note: `${OPENCODE_SESSION_NOTE} Same gateway as the documented inference/go endpoint.`,
   },
   {
     id: 'openai:gpt-5-mini',
@@ -95,6 +140,8 @@ export interface NewProfileInput {
   providerSlug?: string;
   /** Credential slot from the preset; remote profiles derive one when absent. */
   apiKeyRef?: string;
+  /** Static extra headers carried over from a preset that needs them. */
+  headers?: Record<string, string>;
   note?: string;
 }
 
@@ -111,8 +158,19 @@ interface ConfigState {
   removeModel(id: string): void;
 }
 
+/** What the registry row holds, including the defaults the user removed. */
+interface StoredRegistry {
+  models: ModelDescriptor[];
+  selectedId: string;
+  /** Default profile ids that were deleted; kept so a load does not re-add them. */
+  retiredDefaults?: string[];
+}
+
+/** Defaults the user deleted, remembered across restarts. */
+let retiredDefaults: string[] = [];
+
 function persistRegistry(models: ModelDescriptor[], selectedId: string): void {
-  void setJson(STORAGE_KEY, { models, selectedId });
+  void setJson(STORAGE_KEY, { models, selectedId, retiredDefaults });
 }
 
 /**
@@ -138,28 +196,50 @@ function dedupeIds(models: ModelDescriptor[]): ModelDescriptor[] {
   });
 }
 
+/**
+ * Built-in profiles a saved registry predates. Append-only: rows the user made
+ * or edited keep their ids, order and edits, and defaults they deleted stay gone
+ * (see `retiredDefaults`), so shipping a new default reaches existing installs
+ * without rewriting anyone's configuration.
+ */
+function withMissingDefaults(models: ModelDescriptor[]): ModelDescriptor[] {
+  const taken = new Set([...models.map((model) => model.id), ...retiredDefaults]);
+
+  return models.concat(
+    DEFAULT_MODELS.filter((model) => !taken.has(model.id)).map((model) => ({ ...model })),
+  );
+}
+
 export const useConfig = create<ConfigState>()((set, get) => ({
   models: DEFAULT_MODELS,
   selectedId: DEFAULT_MODELS[0].id,
   loaded: false,
 
   async load() {
-    const stored = await getJson<{ models: ModelDescriptor[]; selectedId: string }>(STORAGE_KEY);
+    const stored = await getJson<StoredRegistry>(STORAGE_KEY);
 
     if (stored === null) {
       set({ loaded: true });
       return;
     }
 
-    const models = dedupeIds(stored.models.length > 0 ? stored.models : DEFAULT_MODELS);
+    retiredDefaults = stored.retiredDefaults ?? [];
+
+    const repaired = dedupeIds(stored.models.length > 0 ? stored.models : DEFAULT_MODELS);
+    const models = withMissingDefaults(repaired);
     const selectedId = models.some((m) => m.id === stored.selectedId)
       ? stored.selectedId
       : models[0].id;
 
     set({ models, selectedId, loaded: true });
 
-    // Heal the stored copy too, so the repair survives a restart.
-    if (models.some((model, index) => model.id !== stored.models[index]?.id)) {
+    // Heal the stored copy too: repaired ids, appended defaults, and the
+    // retired list that older builds never wrote.
+    if (
+      models.some((model, index) => model.id !== stored.models[index]?.id) ||
+      models.length !== stored.models.length ||
+      stored.retiredDefaults === undefined
+    ) {
       persistRegistry(models, selectedId);
     }
   },
@@ -207,6 +287,7 @@ export const useConfig = create<ConfigState>()((set, get) => ({
       capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
       contextWindow: input.contextWindow ?? 32768,
       pricing: input.pricing,
+      headers: input.headers,
       note: input.note,
     };
 
@@ -257,6 +338,12 @@ export const useConfig = create<ConfigState>()((set, get) => ({
 
   removeModel(id) {
     const models = get().models.filter((model) => model.id !== id);
+
+    // A deleted built-in must not be re-added by `withMissingDefaults` later.
+    if (DEFAULT_MODELS.some((model) => model.id === id) && !retiredDefaults.includes(id)) {
+      retiredDefaults = [...retiredDefaults, id];
+    }
+
     const selectedId =
       get().selectedId === id ? (models[0]?.id ?? DEFAULT_MODELS[0].id) : get().selectedId;
 
@@ -268,5 +355,6 @@ export const useConfig = create<ConfigState>()((set, get) => ({
 /** Clears persisted configuration back to the defaults. */
 export async function resetConfig(): Promise<void> {
   await deleteKey(STORAGE_KEY);
+  retiredDefaults = [];
   useConfig.setState({ models: DEFAULT_MODELS, selectedId: DEFAULT_MODELS[0].id });
 }

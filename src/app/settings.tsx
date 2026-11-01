@@ -218,8 +218,11 @@ export default function SettingsScreen() {
           a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
           address, or tunnel the port with{' '}
           <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>{' '}
-          (emulator, or a real phone over USB). The provider catalog comes from models.dev and is
-          refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
+          (emulator, or a real phone over USB). Gateways that route by conversation — OpenCode Go —
+          need <Text style={styles.code}>x-opencode-session</Text>, which the app sends with a stable
+          id it stores locally. OpenCode Go ships as a default profile, so it only needs a key
+          pasted here. The provider catalog comes from models.dev and is refreshed with{' '}
+          <Text style={styles.code}>yarn providers:sync</Text>.
         </Text>
       </ScrollView>
     </View>

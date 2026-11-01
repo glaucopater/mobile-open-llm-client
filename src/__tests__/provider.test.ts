@@ -2,12 +2,21 @@ import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 import { DEFAULT_CAPABILITIES, type ModelDescriptor } from '../core/model';
 import { getFetchImplementation, setFetchImplementation } from '../core/http';
+import { CLIENT_USER_AGENT, SESSION_HEADER } from '../core/session';
 import { createLanguageModel } from '../core/provider';
 
 // The AI SDK ships ESM only, so the provider packages are stubbed here. These
 // tests assert our dialect wiring (which base URL, which model shape, which
 // fetch implementation), not the vendor internals. Mock variables must be
 // `mock`-prefixed for `jest.mock` factories to reference them.
+//
+// Session headers come from `core/session.ts`, which persists to SQLite — native,
+// so it is stubbed with a store that always has a stored id.
+jest.mock('../store/db', () => ({
+  getJson: async () => ({ id: 'ses_stored' }),
+  setJson: async () => {},
+  deleteKey: async () => {},
+}));
 const mockOpenAI = jest.fn();
 const mockAnthropic = jest.fn();
 const mockGoogle = jest.fn();
@@ -81,6 +90,7 @@ describe('dialect adapters', () => {
     expect(mockOpenAI).toHaveBeenCalledWith({
       baseURL: 'https://api.openai.com/v1',
       apiKey: 'secret-key',
+      headers: {},
       fetch: getFetchImplementation(),
     });
   });
@@ -109,6 +119,7 @@ describe('dialect adapters', () => {
     expect(mockAnthropic).toHaveBeenCalledWith({
       baseURL: 'https://api.anthropic.com/v1',
       apiKey: 'anthropic-key',
+      headers: {},
       fetch: getFetchImplementation(),
     });
     expect(mockOpenAI).not.toHaveBeenCalled();
@@ -123,6 +134,7 @@ describe('dialect adapters', () => {
     expect(mockGoogle).toHaveBeenCalledWith({
       baseURL: 'https://generativelanguage.googleapis.com/v1beta',
       apiKey: 'gemini-key',
+      headers: {},
       fetch: getFetchImplementation(),
     });
   });
@@ -143,8 +155,37 @@ describe('dialect adapters', () => {
       name: 'ollama',
       baseURL: 'http://10.0.2.2:11434/v1',
       apiKey: undefined,
+      headers: {},
       fetch: getFetchImplementation(),
     });
+  });
+
+  it('passes profile headers through untouched', () => {
+    createLanguageModel(
+      descriptor({ baseUrl: 'https://gateway.example/v1', headers: { 'x-tenant': 'acme' } }),
+      'k',
+    );
+
+    expect(mockOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { 'x-tenant': 'acme' } }),
+    );
+  });
+
+  it('adds a session id and a client user agent for OpenCode', () => {
+    createLanguageModel(
+      descriptor({
+        id: 'opencode-go:deepseek-v4.1-flash',
+        dialect: 'openai-compatible',
+        modelId: 'deepseek-v4.1-flash',
+        baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+      }),
+      'oc_key',
+    );
+
+    const settings = mockCompatible.mock.calls[0][0] as { headers: Record<string, string> };
+
+    expect(settings.headers[SESSION_HEADER]).toMatch(/^ses_/);
+    expect(settings.headers['User-Agent']).toBe(CLIENT_USER_AGENT);
   });
 
   it('exposes the fetch implementation that can be swapped for tests', () => {

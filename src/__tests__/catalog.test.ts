@@ -10,6 +10,7 @@ import {
   searchCatalog,
 } from '../core/catalog-search';
 import { PROVIDER_CATALOG, type CatalogProvider } from '../core/provider-catalog';
+import { needsSessionHeader } from '../core/session';
 import { DEFAULT_MODELS, useConfig } from '../store/config';
 
 // SQLite is native; the registry store is exercised through the in-memory state.
@@ -114,10 +115,33 @@ describe('searchCatalog', () => {
   });
 });
 
+describe('OpenCode presets', () => {
+  it('ships both Go endpoints as defaults on a host that needs the session header', () => {
+    const goProfiles = DEFAULT_MODELS.filter((model) => model.id.startsWith('opencode-go'));
+
+    expect(goProfiles.map((model) => model.baseUrl)).toEqual([
+      'https://opencode.ai/inference/go/openai/v1',
+      'https://opencode.ai/zen/go/v1',
+    ]);
+
+    // The catalog's own Go preset is a profile the picker offers; it must reach
+    // the same gateway the defaults do.
+    const catalogGo = catalogProvider('opencode-go');
+
+    expect(catalogGo?.baseUrl).toBe('https://opencode.ai/inference/go/openai/v1');
+
+    for (const baseUrl of [...goProfiles.map((model) => model.baseUrl), catalogGo?.baseUrl]) {
+      expect(needsSessionHeader(baseUrl ?? '')).toBe(true);
+    }
+  });
+});
+
 describe('formatPrice', () => {
   it('reads sub-cent rates without rounding to zero', () => {
     expect(formatPrice({ inputPer1k: 0.25, outputPer1k: 2 })).toBe('$0.25 / $2.00 per 1k');
-    expect(formatPrice({ inputPer1k: 0.000015, outputPer1k: 0.0006 })).toBe('$0.000015 / $0.0006 per 1k');
+    expect(formatPrice({ inputPer1k: 0.000015, outputPer1k: 0.0006 })).toBe(
+      '$0.000015 / $0.0006 per 1k',
+    );
     expect(formatPrice({ inputPer1k: 0, outputPer1k: 0 })).toBe('free / free per 1k');
     expect(formatPrice(undefined)).toBe('price unknown');
   });

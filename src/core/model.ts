@@ -42,6 +42,12 @@ export interface ModelDescriptor {
   baseUrl?: string;
   /** SecureStore key name holding the API key. Absent for unauthenticated local servers. */
   apiKeyRef?: string;
+  /**
+   * Static extra request headers, merged with the credential header the vendor
+   * package sends. Gateways that demand a conversation id get one from
+   * `core/session.ts` on top of these.
+   */
+  headers?: Record<string, string>;
   source: ModelSource;
   capabilities: ModelCapabilities;
   contextWindow?: number;
