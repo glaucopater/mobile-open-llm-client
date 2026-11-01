@@ -1,205 +1,236 @@
-import { useEffect, useRef, useState } from 'react';
+/**
+ * Settings, scoped to providers.
+ *
+ * Each provider card holds what one provider needs — endpoint, dialect,
+ * credential — and the models it offers, switchable from inside the card. There
+ * is no per-model profile: a model is picked from the provider's list, and only
+ * what the user typed, hid or overrode is stored.
+ */
+import { Link } from 'expo-router';
+import { useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import type { TextInputInstance } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { describeConnection, testModelConnection, type ConnectionTest } from '../core/agent';
-import { budgetFor } from '../core/context';
+import { AppHeader } from '../components/AppHeader';
+import { ProviderCard } from '../components/ProviderCard';
 import {
   catalogCount,
   catalogProvider,
   FEATURED_SLUGS,
   formatPrice,
-  profileInputFromCatalog,
+  providerInputFromCatalog,
   searchCatalog,
 } from '../core/catalog-search';
-import { deleteApiKey, hasApiKey, primeKeyCache, setApiKey } from '../core/keys';
-import {
-  dialectDefaultBaseUrl,
-  endpointPreview,
-  normalizeBaseUrl,
-  type Dialect,
-  type ModelCapabilities,
-  type ModelDescriptor,
-  type ModelSource,
-} from '../core/model';
 import type { CatalogProvider } from '../core/provider-catalog';
-import { LOCAL_SERVER_DEFAULT_BASE_URL, useConfig } from '../store/config';
-
-const DIALECTS: { id: Dialect; label: string }[] = [
-  { id: 'openai-chat', label: 'OpenAI chat' },
-  { id: 'openai-responses', label: 'OpenAI responses' },
-  { id: 'anthropic-messages', label: 'Anthropic' },
-  { id: 'gemini-generate-content', label: 'Gemini' },
-  { id: 'openai-compatible', label: 'OpenAI-compatible' },
-];
-
-const SOURCES: { id: ModelSource; label: string }[] = [
-  { id: 'remote', label: 'Remote' },
-  { id: 'local-server', label: 'LAN server' },
-  { id: 'on-device', label: 'On device' },
-];
+import { LOCAL_SERVER_DEFAULT_BASE_URL, resetConfig, useConfig } from '../store/config';
+import { useKeyboardAwareScroll } from '../hooks/useKeyboardAwareScroll';
+import { useKeyboardPadding } from '../hooks/useKeyboardPadding';
+import { theme } from '../theme';
 
 export default function SettingsScreen() {
-  const models = useConfig((state) => state.models);
-  const selectedId = useConfig((state) => state.selectedId);
-  const select = useConfig((state) => state.select);
-  const createProfile = useConfig((state) => state.createProfile);
-  const removeModel = useConfig((state) => state.removeModel);
+  const providers = useConfig((state) => state.providers);
+  const selectedSlug = useConfig((state) => state.selectedSlug);
+  const { scrollRef, onScroll, reveal } = useKeyboardAwareScroll();
+  const keyboardPadding = useKeyboardPadding();
+  // See the chat screen: the keyboard also covers the navigation bar, which
+  // `endCoordinates.height` leaves out, so the inset is padded on top of it.
+  const insets = useSafeAreaInsets();
 
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const editing = models.find((model) => model.id === editingId);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [resetDone, setResetDone] = useState(false);
 
-  const addFromCatalog = (provider: CatalogProvider) => {
+  const addFromCatalog = (entry: CatalogProvider) => {
     setPickerOpen(false);
-    setEditingId(createProfile(profileInputFromCatalog(provider)).id);
+    useConfig.getState().addProvider(providerInputFromCatalog(entry));
   };
 
   const addRemoteProvider = () => {
     setPickerOpen(false);
-    setEditingId(
-      createProfile({
-        source: 'remote',
-        dialect: 'openai-chat',
-        label: 'New provider',
-        modelId: 'model',
-      }).id,
-    );
+    useConfig.getState().addProvider({
+      source: 'remote',
+      dialect: 'openai-chat',
+      name: 'New provider',
+    });
   };
 
   const addLocalServer = () => {
     setPickerOpen(false);
-    setEditingId(
-      createProfile({
-        source: 'local-server',
-        dialect: 'openai-compatible',
-        label: 'New LAN server',
-        modelId: 'model',
-        baseUrl: LOCAL_SERVER_DEFAULT_BASE_URL,
-      }).id,
-    );
+    useConfig.getState().addProvider({
+      source: 'local-server',
+      dialect: 'openai-compatible',
+      name: 'New LAN server',
+      baseUrl: LOCAL_SERVER_DEFAULT_BASE_URL,
+    });
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.section}>Models</Text>
+    // Android draws edge-to-edge since SDK 53, so the window is never resized by
+    // the keyboard: the viewport has to be padded by the keyboard height itself,
+    // and `reveal` scrolls the focused field into that smaller box.
+    <View
+      style={StyleSheet.compose(styles.container, { paddingBottom: keyboardPadding + insets.bottom })}
+    >
+      <AppHeader
+        label="Settings"
+        actions={
+          <Link href="/" style={styles.headerAction}>
+            Chat
+          </Link>
+        }
+      />
+      <ScrollView
+        ref={scrollRef}
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+      >
+        <Text style={styles.section}>Providers ({providers.length})</Text>
 
-      {models.map((model) => (
-        <View key={model.id} style={styles.row}>
-          <Pressable onPress={() => select(model.id)} style={styles.rowMain}>
-            <Text style={styles.label}>{model.label}</Text>
-            <Text style={styles.note}>
-              {model.dialect} · {model.modelId} · ctx {model.contextWindow ?? 'unset'}
+        {providers.length === 0 ? (
+          <Text style={styles.note}>
+            No providers configured. Add one from the catalog below, then pick a model.
+          </Text>
+        ) : null}
+
+        {providers.map((provider) => (
+          <ProviderCard
+            key={provider.slug}
+            provider={provider}
+            isSelected={provider.slug === selectedSlug}
+            reveal={reveal}
+          />
+        ))}
+
+        <View style={styles.buttonRow}>
+          <Pressable
+            style={({ pressed }) => [styles.primaryButton, pressed ? styles.primaryPressed : undefined]}
+            onPress={() => setPickerOpen((open) => !open)}
+            accessibilityRole="button"
+          >
+            <Text style={styles.primaryButtonText}>
+              {pickerOpen ? 'Close provider list' : 'Add provider from catalog'}
             </Text>
-            <Text style={styles.note}>{endpointPreview(model)}</Text>
-            {model.id === selectedId ? <Text style={styles.selected}>selected for chat</Text> : null}
           </Pressable>
           <Pressable
-            onPress={() => {
-              setPickerOpen(false);
-              setEditingId(model.id);
-            }}
-            style={styles.editButton}
+            style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+            onPress={addRemoteProvider}
+            accessibilityRole="button"
           >
-            <Text style={styles.editText}>Edit</Text>
+            <Text style={styles.secondaryButtonText}>Blank remote</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+            onPress={addLocalServer}
+            accessibilityRole="button"
+          >
+            <Text style={styles.secondaryButtonText}>Add LAN server</Text>
           </Pressable>
         </View>
-      ))}
 
-      <View style={styles.buttonRow}>
-        <Pressable style={styles.primaryButton} onPress={() => setPickerOpen((open) => !open)}>
-          <Text style={styles.primaryButtonText}>
-            {pickerOpen ? 'Close provider list' : 'Add provider from catalog'}
-          </Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={addRemoteProvider}>
-          <Text style={styles.secondaryButtonText}>Blank remote</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={addLocalServer}>
-          <Text style={styles.secondaryButtonText}>Add LAN server</Text>
-        </Pressable>
-      </View>
-
-      {pickerOpen ? (
-        <ProviderPicker query={query} onQueryChange={setQuery} onPick={addFromCatalog} />
-      ) : null}
-
-      {editing !== undefined ? (
-        <>
-          {/* Remount per profile: the editor's fields are local state seeded from
-              the model, and must not leak the previous profile's values. */}
-          <ModelEditor
-            key={editing.id}
-            model={editing}
-            onSave={(patch) => {
-              useConfig.getState().updateModel(editing.id, patch);
-              setEditingId(null);
-            }}
-            onCancel={() => setEditingId(null)}
+        {pickerOpen ? (
+          <ProviderPicker
+            query={query}
+            onQueryChange={setQuery}
+            onPick={addFromCatalog}
+            reveal={reveal}
           />
-          <Pressable
-            style={styles.dangerButton}
-            onPress={() => {
-              removeModel(editing.id);
-              setEditingId(null);
-            }}
-          >
-            <Text style={styles.dangerButtonText}>Delete this model</Text>
-          </Pressable>
-        </>
-      ) : null}
+        ) : null}
 
-      <Text style={styles.footer}>
-        Keys are stored in SecureStore, never in SQLite. Auth follows the dialect: OpenAI-style
-        dialects send <Text style={styles.code}>Authorization: Bearer</Text>, Anthropic sends
-        <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query. Test
-        connection probes the endpoint with the typed key without storing it. The context window you
-        set here is what the request guard budgets against — set it to the server&apos;s ctx size. For
-        a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
-        address, or tunnel the port with <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>
-        (emulator, or a real phone over USB). The provider catalog comes
-        from models.dev and is refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
-      </Text>
-    </ScrollView>
+        <View style={styles.buttonRow}>
+          <Pressable
+            style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
+            onPress={() => {
+              void resetConfig().then(() => setResetDone(true));
+            }}
+            accessibilityRole="button"
+          >
+            <Text style={styles.dangerButtonText}>Reset to built-in providers</Text>
+          </Pressable>
+        </View>
+        {resetDone ? (
+          <Text style={styles.note}>
+            Providers reset. Keys are untouched — they live in SecureStore, not in this list.
+          </Text>
+        ) : null}
+
+        <Text style={styles.footer}>
+          One provider holds one endpoint, one dialect and one credential; the models it offers are
+          picked inside the card, and switching model does not re-enter anything. Model lists come
+          from models.dev and are refreshed with <Text style={styles.code}>yarn providers:sync</Text>
+          {' '}— a LAN server instead answers <Text style={styles.code}>GET /models</Text>, which the{' '}
+          <Text style={styles.code}>List models from server</Text> button reads. Keys are kept in
+          SecureStore (in the web dev build, unencrypted localStorage), never in SQLite. Auth follows
+          the dialect: OpenAI-style dialects send <Text style={styles.code}>Authorization: Bearer</Text>,
+          Anthropic sends <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query.
+          Test connection probes the endpoint with the typed key without storing it — press{' '}
+          <Text style={styles.code}>Save key</Text> to keep it. A model&apos;s context window is what
+          the request guard budgets against. For a LAN server bind it to{' '}
+          <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN address. Gateways that
+          route by conversation — OpenCode Go — need <Text style={styles.code}>x-opencode-session</Text>,
+          which the app sends with a stable id it stores locally. The web dev target runs inside a
+          browser, so an endpoint that sends no{' '}
+          <Text style={styles.code}>Access-Control-Allow-Origin</Text> is blocked before the key ever
+          leaves the page, and the failure reads as a network error; the phone build has no CORS and
+          reaches the same endpoint.
+        </Text>
+      </ScrollView>
+    </View>
   );
 }
 
 /**
  * Catalog picker: a search box plus a capped list of matches. Typing filters
- * name, slug, endpoint, model id and dialect, so a 220-entry catalog stays
- * usable on a phone without virtualising the list.
+ * name, slug, endpoint, dialect and the provider's models, so a catalog of 218
+ * providers stays usable on a phone without virtualising the list.
  */
 function ProviderPicker({
   query,
   onQueryChange,
   onPick,
+  reveal,
 }: {
   query: string;
   onQueryChange: (text: string) => void;
   onPick: (provider: CatalogProvider) => void;
+  reveal: (target: TextInputInstance | null) => void;
 }) {
   const results = searchCatalog(query);
   const total = catalogCount(query);
   const popular = FEATURED_SLUGS.slice(0, 8).map((slug) => catalogProvider(slug));
+  const searchRef = useRef<TextInputInstance>(null);
 
   return (
-    <View style={styles.editor}>
+    <View style={styles.picker}>
       <Text style={styles.section}>Providers ({total})</Text>
 
       <TextInput
-        style={styles.field}
+        ref={searchRef}
+        style={styles.search}
         value={query}
         onChangeText={onQueryChange}
         placeholder="Search providers, endpoints or models"
+        placeholderTextColor={theme.subtle}
         autoCapitalize="none"
         autoCorrect={false}
+        accessibilityLabel="Search providers"
+        onFocus={() => reveal(searchRef.current)}
+        selectionColor={theme.accent}
       />
 
       {query.trim().length === 0 ? (
         <View style={styles.chipRow}>
           {popular.map((provider) =>
             provider === undefined ? null : (
-              <Pressable key={provider.slug} style={styles.chip} onPress={() => onPick(provider)}>
+              <Pressable
+                key={provider.slug}
+                style={({ pressed }) => [styles.chip, pressed ? styles.chipPressed : undefined]}
+                onPress={() => onPick(provider)}
+                accessibilityRole="button"
+              >
                 <Text style={styles.chipText}>{provider.name}</Text>
               </Pressable>
             ),
@@ -208,16 +239,23 @@ function ProviderPicker({
       ) : null}
 
       {results.map((provider) => (
-        <Pressable key={provider.slug} onPress={() => onPick(provider)} style={styles.catalogRow}>
+        <Pressable
+          key={provider.slug}
+          onPress={() => onPick(provider)}
+          style={({ pressed }) => [styles.catalogRow, pressed ? styles.pressed : undefined]}
+          accessibilityRole="button"
+          accessibilityLabel={`Add ${provider.name}`}
+        >
           <Text style={styles.label}>
             {provider.name}
-            {provider.source === 'local-server' ? <Text style={styles.note}> · LAN</Text> : null}
+            {provider.source === 'local-server' ? <Text style={styles.badge}> · LAN</Text> : null}
           </Text>
           <Text style={styles.note}>{provider.baseUrl}</Text>
           <Text style={styles.note}>
-            {provider.dialect} · {provider.modelId} · ctx {provider.contextWindow ?? 'unset'} ·{' '}
-            {formatPrice(provider.pricing)}
+            {provider.dialect} · starts on {provider.modelId} ·{' '}
+            {provider.models.length} models · {formatPrice(provider.models.find((model) => model.id === provider.modelId)?.pricing)}
           </Text>
+          {provider.note !== undefined ? <Text style={styles.warn}>{provider.note}</Text> : null}
         </Pressable>
       ))}
 
@@ -230,312 +268,23 @@ function ProviderPicker({
   );
 }
 
-function ModelEditor({
-  model,
-  onSave,
-  onCancel,
-}: {
-  model: ModelDescriptor;
-  onSave: (patch: Partial<ModelDescriptor>) => void;
-  onCancel: () => void;
-}) {
-  const [label, setLabel] = useState(model.label);
-  const [modelId, setModelId] = useState(model.modelId);
-  const [baseUrl, setBaseUrl] = useState(model.baseUrl ?? dialectDefaultBaseUrl(model.dialect));
-  const [contextWindow, setContextWindow] = useState(String(model.contextWindow ?? 32768));
-  const [apiKeyRef, setApiKeyRef] = useState(model.apiKeyRef ?? '');
-  const [apiKey, setKey] = useState('');
-  const [keyStored, setKeyStored] = useState(false);
-  const [testResult, setTestResult] = useState<ConnectionTest | null>(null);
-  const [testing, setTesting] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-
-  const dialect = model.dialect;
-  const source = model.source;
-  const capabilities = model.capabilities;
-
-  useEffect(() => {
-    let active = true;
-
-    hasApiKey(model.apiKeyRef).then((stored) => {
-      if (active) {
-        setKeyStored(stored);
-      }
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [model.apiKeyRef]);
-
-  /** The profile as typed, which is what Save and the probe act on. */
-  const draft: ModelDescriptor = {
-    ...model,
-    label: label.trim() || model.label,
-    modelId: modelId.trim() || model.modelId,
-    baseUrl: normalizeBaseUrl(baseUrl),
-    contextWindow: Number(contextWindow) || undefined,
-    apiKeyRef: apiKeyRef.trim() || undefined,
-  };
-
-  /**
-   * Writes through the store, then re-reads the credential slot: switching
-   * source derives a slot (remote) or drops it (LAN server).
-   */
-  const patchModel = (patch: Partial<ModelDescriptor>) => {
-    useConfig.getState().updateModel(model.id, patch);
-    setApiKeyRef(
-      useConfig.getState().models.find((candidate) => candidate.id === model.id)?.apiKeyRef ?? '',
-    );
-    setTestResult(null);
-  };
-
-  const changeDialect = (next: Dialect) => {
-    // An endpoint the user never touched follows the new dialect's vendor origin.
-    if (baseUrl.trim() === dialectDefaultBaseUrl(model.dialect)) {
-      setBaseUrl(dialectDefaultBaseUrl(next));
-    }
-
-    patchModel({ dialect: next });
-  };
-
-  const changeSource = (next: ModelSource) => {
-    patchModel({ source: next });
-
-    if (next === 'local-server') {
-      setBaseUrl(LOCAL_SERVER_DEFAULT_BASE_URL);
-    } else if (baseUrl.trim() === LOCAL_SERVER_DEFAULT_BASE_URL) {
-      setBaseUrl(dialectDefaultBaseUrl(draft.dialect));
-    }
-  };
-
-  const toggleCapability = (key: keyof ModelCapabilities) => {
-    useConfig
-      .getState()
-      .updateModel(model.id, { capabilities: { ...capabilities, [key]: !capabilities[key] } });
-  };
-
-  const resetEndpoint = () => {
-    setBaseUrl(dialectDefaultBaseUrl(draft.dialect));
-    setTestResult(null);
-  };
-
-  const runTest = async () => {
-    const typedKey = apiKey.trim();
-    const controller = new AbortController();
-
-    abortRef.current = controller;
-    setTesting(true);
-    setTestResult(null);
-
-    try {
-      setTestResult(
-        await testModelConnection(draft, {
-          apiKey: typedKey.length > 0 ? typedKey : undefined,
-          abortSignal: controller.signal,
-        }),
-      );
-    } finally {
-      abortRef.current = null;
-      setTesting(false);
-    }
-  };
-
-  const cancelTest = () => {
-    abortRef.current?.abort();
-  };
-
-  const saveKey = async () => {
-    const ref = apiKeyRef.trim();
-
-    if (ref.length === 0 || apiKey.trim().length === 0) {
-      return;
-    }
-
-    await setApiKey(ref, apiKey.trim());
-    await primeKeyCache([ref]);
-    setKeyStored(true);
-    setKey('');
-  };
-
-  const clearKey = async () => {
-    const ref = apiKeyRef.trim();
-
-    if (ref.length === 0) {
-      return;
-    }
-
-    await deleteApiKey(ref);
-    await primeKeyCache([ref]);
-    setKeyStored(false);
-  };
-
-  const budget = budgetFor(Number(contextWindow) || undefined);
-
-  return (
-    <View style={styles.editor}>
-      <Text style={styles.section}>{model.id}</Text>
-
-      <Field label="Label" value={label} onChangeText={setLabel} />
-      <Field label="Model id" value={modelId} onChangeText={setModelId} />
-      <Field
-        label="Base URL"
-        value={baseUrl}
-        onChangeText={setBaseUrl}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-      <Field label="Context window (tokens)" value={contextWindow} onChangeText={setContextWindow} keyboardType="number-pad" />
-      <Field label="API key ref" value={apiKeyRef} onChangeText={setApiKeyRef} autoCapitalize="none" />
-
-      <View style={styles.chipRow}>
-        {DIALECTS.map((option) => (
-          <Pressable
-            key={option.id}
-            style={[styles.chip, dialect === option.id ? styles.chipOn : undefined]}
-            onPress={() => changeDialect(option.id)}
-          >
-            <Text style={styles.chipText}>{option.label}</Text>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={styles.chipRow}>
-        {SOURCES.map((option) => (
-          <Pressable
-            key={option.id}
-            style={[styles.chip, source === option.id ? styles.chipOn : undefined]}
-            onPress={() => changeSource(option.id)}
-          >
-            <Text style={styles.chipText}>{option.label}</Text>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={styles.chipRow}>
-        {(
-          [
-            ['tools', 'tools'],
-            ['vision', 'vision'],
-            ['reasoning', 'reasoning'],
-          ] as const
-        ).map(([key, text]) => (
-          <Pressable
-            key={key}
-            style={[styles.chip, capabilities[key] ? styles.chipOn : undefined]}
-            onPress={() => toggleCapability(key)}
-          >
-            <Text style={styles.chipText}>{text}</Text>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={styles.chipRow}>
-        <Pressable style={styles.chip} onPress={resetEndpoint}>
-          <Text style={styles.chipText}>Use dialect default endpoint</Text>
-        </Pressable>
-      </View>
-
-      <Text style={styles.preview}>{endpointPreview(draft)}</Text>
-      <Text style={styles.note}>
-        request budget: prompt ≤ {budget.inputBudget}, answer {budget.maxOutputTokens}
-      </Text>
-      {model.pricing !== undefined ? <Text style={styles.note}>{formatPrice(model.pricing)}</Text> : null}
-      {model.note !== undefined ? <Text style={styles.warn}>{model.note}</Text> : null}
-
-      <View style={styles.buttonRow}>
-        <Pressable style={styles.secondaryButton} onPress={runTest} disabled={testing}>
-          <Text style={styles.secondaryButtonText}>{testing ? 'Testing…' : 'Test connection'}</Text>
-        </Pressable>
-        {testing ? (
-          <Pressable style={styles.dangerButton} onPress={cancelTest}>
-            <Text style={styles.dangerButtonText}>Cancel</Text>
-          </Pressable>
-        ) : null}
-      </View>
-
-      {testResult !== null ? (
-        <Text style={testResult.ok ? styles.testOk : styles.testFail}>
-          {describeConnection(draft, testResult)}
-        </Text>
-      ) : null}
-
-      <View style={styles.keyRow}>
-        <TextInput
-          style={styles.field}
-          value={apiKey}
-          onChangeText={setKey}
-          placeholder={keyStored ? 'Key stored — paste a new one to replace' : 'Paste API key'}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <Pressable style={styles.secondaryButton} onPress={saveKey}>
-          <Text style={styles.secondaryButtonText}>Save key</Text>
-        </Pressable>
-        {keyStored ? (
-          <Pressable style={styles.dangerButton} onPress={clearKey}>
-            <Text style={styles.dangerButtonText}>Clear</Text>
-          </Pressable>
-        ) : null}
-      </View>
-
-      <View style={styles.buttonRow}>
-        <Pressable
-          style={styles.primaryButton}
-          onPress={() =>
-            onSave({
-              label: label.trim() || model.label,
-              modelId: modelId.trim() || model.modelId,
-              baseUrl: normalizeBaseUrl(baseUrl),
-              contextWindow: Number(contextWindow) || undefined,
-              apiKeyRef: apiKeyRef.trim() || undefined,
-            })
-          }
-        >
-          <Text style={styles.primaryButtonText}>Save changes</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={onCancel}>
-          <Text style={styles.secondaryButtonText}>Cancel</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChangeText,
-  keyboardType,
-  autoCapitalize,
-  autoCorrect,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (text: string) => void;
-  keyboardType?: 'number-pad' | 'default';
-  autoCapitalize?: 'none' | 'sentences';
-  autoCorrect?: boolean;
-}) {
-  return (
-    <View style={styles.fieldRow}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
-        style={styles.field}
-        value={value}
-        onChangeText={onChangeText}
-        keyboardType={keyboardType ?? 'default'}
-        autoCapitalize={autoCapitalize ?? 'sentences'}
-        autoCorrect={autoCorrect ?? true}
-      />
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: theme.bg,
+  },
+  scroll: {
+    flex: 1,
+  },
+  /** Back to chat; the navigator header is off, so this is the only way out. */
+  headerAction: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   content: {
     padding: 16,
@@ -545,91 +294,69 @@ const styles = StyleSheet.create({
   section: {
     fontSize: 14,
     fontWeight: '700',
+    color: theme.text,
+    letterSpacing: 0.4,
     marginTop: 8,
   },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
-    paddingBottom: 8,
+  /** Pressed feedback: a tinted fill, since colour alone is hard to see on tap. */
+  pressed: {
+    backgroundColor: theme.accentSoft,
+    borderColor: theme.accent,
   },
-  rowMain: {
-    flex: 1,
-    gap: 2,
+  /** Pressed feedback for filled controls — the fill darkens, white text stays AA. */
+  primaryPressed: {
+    backgroundColor: theme.accentPressed,
+  },
+  dangerPressed: {
+    backgroundColor: theme.dangerPressed,
+  },
+  /** Chips keep their fill when selected, so they thicken instead of tinting. */
+  chipPressed: {
+    borderWidth: 2,
+    borderColor: theme.accent,
   },
   label: {
     fontSize: 15,
     fontWeight: '600',
+    color: theme.text,
   },
   note: {
     fontSize: 12,
-    opacity: 0.65,
-  },
-  preview: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    opacity: 0.75,
-  },
-  testOk: {
-    fontSize: 12,
-    color: '#15803D',
-  },
-  testFail: {
-    fontSize: 12,
-    color: '#B02A30',
-  },
-  selected: {
-    fontSize: 12,
-    color: '#0A7FB5',
-  },
-  editButton: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#DDDDDD',
-    // Touch target stays ≥44dp so the button is hittable on small screens.
-    minWidth: 48,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-  },
-  editText: {
-    fontSize: 13,
-  },
-  catalogRow: {
-    gap: 2,
-    borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
-    paddingBottom: 6,
+    color: theme.muted,
   },
   warn: {
     fontSize: 12,
-    color: '#8A5A00',
+    color: theme.warn,
   },
-  editor: {
-    borderWidth: 1,
-    borderColor: '#DDDDDD',
-    borderRadius: 10,
-    padding: 12,
-    gap: 8,
-  },
-  fieldRow: {
-    gap: 4,
-  },
-  fieldLabel: {
+  badge: {
     fontSize: 12,
     fontWeight: '600',
-    opacity: 0.7,
+    color: theme.accentText,
   },
-  field: {
+  picker: {
+    gap: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.border,
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: theme.card,
+  },
+  search: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: theme.borderStrong,
     borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 8,
     fontSize: 14,
+    color: theme.text,
+    backgroundColor: theme.card,
+  },
+  catalogRow: {
+    gap: 2,
+    padding: 8,
+    borderRadius: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.border,
   },
   chipRow: {
     flexDirection: 'row',
@@ -637,76 +364,74 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   chip: {
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#DDDDDD',
     paddingHorizontal: 10,
     paddingVertical: 6,
-  },
-  chipOn: {
-    backgroundColor: '#E6F4FE',
-    borderColor: '#0A7FB5',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.border,
+    backgroundColor: theme.card,
   },
   chipText: {
     fontSize: 12,
-  },
-  keyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   buttonRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
   primaryButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderRadius: 8,
-    backgroundColor: '#0A7FB5',
+    backgroundColor: theme.accent,
     minHeight: 44,
-    alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
   },
   primaryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+    color: '#FFFFFF',
   },
   secondaryButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
-    minHeight: 44,
-    alignItems: 'center',
+    borderColor: theme.accent,
+    backgroundColor: theme.card,
+    minHeight: 40,
     justifyContent: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
   },
   secondaryButtonText: {
-    fontSize: 14,
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   dangerButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#B02A30',
-    minHeight: 44,
-    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: theme.danger,
+    backgroundColor: theme.dangerSoft,
+    minHeight: 40,
     justifyContent: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
   },
   dangerButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+    color: theme.danger,
   },
   footer: {
     fontSize: 12,
-    opacity: 0.6,
-    lineHeight: 17,
+    color: theme.muted,
+    lineHeight: 18,
+    marginTop: 8,
   },
   code: {
     fontFamily: 'monospace',
-    fontSize: 11,
+    color: theme.text,
   },
 });

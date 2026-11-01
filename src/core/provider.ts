@@ -11,7 +11,26 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
 import { getFetchImplementation } from './http';
+import { acceptsImages } from './image';
 import { resolvedBaseUrl, type ModelDescriptor } from './model';
+import { CLIENT_USER_AGENT, conversationSessionId, needsSessionHeader, SESSION_HEADER } from './session';
+
+/**
+ * Extra request headers: the profile's own, plus what a gateway demands.
+ *
+ * The vendor packages merge these into every request, and the credential header
+ * is added by them on top, so nothing here has to know about auth.
+ */
+export function requestHeaders(model: ModelDescriptor): Record<string, string> {
+  const headers: Record<string, string> = { ...model.headers };
+
+  if (needsSessionHeader(resolvedBaseUrl(model))) {
+    headers[SESSION_HEADER] ??= conversationSessionId();
+    headers['User-Agent'] ??= CLIENT_USER_AGENT;
+  }
+
+  return headers;
+}
 
 /**
  * Resolves a descriptor into a model instance.
@@ -24,12 +43,14 @@ import { resolvedBaseUrl, type ModelDescriptor } from './model';
 export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
   const baseURL = resolvedBaseUrl(model);
   const fetch = getFetchImplementation();
+  const headers = requestHeaders(model);
 
   switch (model.dialect) {
     case 'openai-chat':
       return createOpenAI({
         baseURL,
         apiKey,
+        headers,
         fetch,
       }).chat(model.modelId);
 
@@ -37,6 +58,7 @@ export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
       return createOpenAI({
         baseURL,
         apiKey,
+        headers,
         fetch,
       }).responses(model.modelId);
 
@@ -44,6 +66,7 @@ export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
       return createAnthropic({
         baseURL,
         apiKey,
+        headers,
         fetch,
       }).messages(model.modelId);
 
@@ -51,6 +74,7 @@ export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
       return createGoogleGenerativeAI({
         baseURL,
         apiKey,
+        headers,
         fetch,
       })(model.modelId);
 
@@ -61,7 +85,13 @@ export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
         name: model.id.split(':')[0] ?? 'local',
         baseURL,
         apiKey,
+        headers,
         fetch,
+        // `fetch_image` answers with a media part. Without this flag the adapter
+        // JSON-stringifies it, so the model would read base64 instead of a
+        // picture. Only vision models are given that shape, because a plain
+        // OpenAI-compatible server can reject array content on a tool message.
+        supportsMultiPartToolContent: acceptsImages(model),
       }).chatModel(model.modelId);
   }
 }

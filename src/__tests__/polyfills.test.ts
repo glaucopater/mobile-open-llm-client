@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import '../polyfills';
+import { installRuntimePolyfills } from '../polyfills';
 
 const mutableGlobals = globalThis as unknown as Record<string, unknown>;
+
+/** Names the guards may have installed, so a stripped runtime can be restored. */
+const GUARDED_NAMES = ['structuredClone', 'TextEncoderStream', 'TextDecoderStream'] as const;
 
 describe('runtime capability guards', () => {
   it('provides structuredClone', () => {
@@ -47,31 +50,25 @@ describe('runtime capability guards', () => {
   it('keeps a native implementation instead of replacing it', () => {
     const nativeClone = globalThis.structuredClone;
 
-    jest.isolateModules(() => {
-      jest.requireActual('../polyfills');
-    });
+    installRuntimePolyfills();
 
     expect(globalThis.structuredClone).toBe(nativeClone);
   });
 
   it('installs fallbacks on a runtime that lacks the APIs', () => {
-    const snapshot = {
-      structuredClone: mutableGlobals.structuredClone,
-      TextEncoderStream: mutableGlobals.TextEncoderStream,
-      TextDecoderStream: mutableGlobals.TextDecoderStream,
-    };
+    const snapshot: Record<string, unknown> = {};
 
-    delete mutableGlobals.structuredClone;
-    delete mutableGlobals.TextEncoderStream;
-    delete mutableGlobals.TextDecoderStream;
+    for (const name of GUARDED_NAMES) {
+      snapshot[name] = mutableGlobals[name];
+      delete mutableGlobals[name];
+    }
 
-    jest.isolateModules(() => {
-      jest.requireActual('../polyfills');
-    });
+    installRuntimePolyfills();
 
-    expect(typeof mutableGlobals.structuredClone).toBe('function');
-    expect(typeof mutableGlobals.TextEncoderStream).toBe('function');
-    expect(typeof mutableGlobals.TextDecoderStream).toBe('function');
+    for (const name of GUARDED_NAMES) {
+      expect(typeof mutableGlobals[name]).toBe('function');
+    }
+
     expect(globalThis.structuredClone({ a: [1] })).toEqual({ a: [1] });
 
     for (const [name, value] of Object.entries(snapshot)) {
@@ -81,5 +78,10 @@ describe('runtime capability guards', () => {
 });
 
 afterEach(() => {
-  jest.resetModules();
+  // The stripped-runtime test mutates real globals, so every test starts clean.
+  for (const name of GUARDED_NAMES) {
+    if (mutableGlobals[name] === undefined) {
+      installRuntimePolyfills();
+    }
+  }
 });

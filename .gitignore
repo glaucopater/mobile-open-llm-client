@@ -30,6 +30,8 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+# headless Edge screenshot from yarn web:check when --out points at the repo root
+web-check.png
 
 # macOS
 .DS_Store

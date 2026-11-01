@@ -8,18 +8,28 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # Corepack downloads the yarn version pinned in package.json; without this
+      # it waits for an interactive confirmation that CI never answers.
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
     steps:
       - uses: actions/checkout@v4
+
+      # Enabled before setup-node, whose cache step runs `yarn --version` to pick
+      # its cache key. With the global yarn 1.22 still first on PATH, that probe
+      # fails on the `packageManager` field and the job dies before installing.
+      - run: corepack enable
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: yarn
 
-      - run: corepack enable
       - run: yarn install --immutable
 
       - run: yarn typecheck
       - run: yarn lint
-      - run: yarn test --ci
+      # Vitest 5 has no `--ci` flag; `vitest run` (the `test` script) is already a
+      # one-shot run that exits non-zero on failure, so nothing else is needed.
+      - run: yarn test
       - run: yarn expo-doctor
