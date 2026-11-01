@@ -136,6 +136,12 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   second tap followed, and a `KEYCODE_BACK` sent while the keyboard is down navigates out of
   the app instead of hiding it.
 
+- **v1.4.0 (versionCode 5) is built but not yet re-checked on the phone**: `assembleRelease` took 7m30s
+  and produced a 34.5 MB arm64-only APK. Wireless adb had dropped (`adb devices` lists nothing), so
+  `yarn device:e2e` and the OpenCode Go round trip still need a device. The gateway behaviour is proven
+  from this host instead: both Go URLs answer `400 MissingSessionID` without `x-opencode-session` and
+  `401 Invalid credential` with it and a dummy key, so routing works and only the key is missing.
+
 - **Fat tool results are verified in jest, not on the phone**: `src/__tests__/agent-wire.test.ts`
   runs the real `ToolLoopAgent` loop with the real guard and a scripted provider
   (`MockLanguageModelV4` from `ai/test`), so it reads the prompt the guard handed the model. A
@@ -214,7 +220,9 @@ src/
   `https://opencode.ai/zen/go/v1` (older alias) — both with model `deepseek-v4.1-flash` (1M ctx, tools +
   vision + reasoning, $0.15/$0.60 per 1M tokens per models.dev) sharing one credential slot, so pasting
   the key in Settings is all the phone needs. The catalog's `opencode` entry is the pay-as-you-go Console
-  gateway (`inference/openai/v1`), not the Go one.
+  gateway (`inference/openai/v1`), not the Go one. `generate-provider-catalog.mjs` lists both under
+  `PAID_ONLY_MODELS`, so a preset added from the picker suggests a paid model instead of a free one that
+  would answer `403`.
 - **Built-in defaults reach installs that already saved a registry**: `load()` appends any `DEFAULT_MODELS`
   profile whose id is missing, keeping user rows in their own order and their edits intact, and stores
   `retiredDefaults` so a profile the user deleted is not resurrected. Web keeps the same row in
