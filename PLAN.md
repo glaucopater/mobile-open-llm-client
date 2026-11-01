@@ -232,6 +232,22 @@ src/
   and the step dies on the `packageManager: yarn@4.13.0` mismatch in seconds — the job never reaches
   `yarn install`. `corepack enable` is therefore the first step, and `COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'`
   is set at job level so the pinned Yarn download is not gated on an interactive confirmation.
+- **What leaves the device is asserted, not assumed**: `src/__tests__/opencode-wire.test.ts` drives the
+  real `@ai-sdk/openai-compatible` adapter through `createLanguageModel` and `setFetchImplementation`, so
+  the outgoing request is inspected rather than the config object. Two things the wire shows that config
+  does not: the vendor package lower-cases its header keys (`headers.get('user-agent')`, not
+  `headers['User-Agent']`) and appends its own suffix, so the client name is only a prefix of
+  `User-Agent`; and the adapter's setting is `baseURL`, so passing `baseUrl` yields
+  `TypeError: Invalid URL` from `new URL('undefined/chat/completions')`. `inputMode` is a V5 field and is
+  rejected by `tsc` against the V4 spec the SDK ships.
+- **Device harness stability**: `identity` polls for the name and version instead of reading one dump -
+  the first v1.4.0 run failed there while the header was on screen a moment later. `waitFor` returns what
+  the predicate returns, so a predicate that wants the whole node list must return the list.
+  `execFileSync` inherits the parent's stderr by default, and device-side `dumpsys | grep` emits
+  "Failed to write while dumping service window: Broken pipe" on every early pipe close - dozens of lines
+  per run. `stdio: ['pipe', 'pipe', 'pipe']` captures it (the transport-recovery retry still reads
+  `error.stderr`) and the output is nine lines. Run it as
+  `node scripts/device-e2e.mjs --only=<check>` (equals form); options are not space-separated.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.
 
 ## Open questions

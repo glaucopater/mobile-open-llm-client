@@ -69,7 +69,15 @@ function adb(...args) {
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return execFileSync('adb', argv, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim();
+      // `stdio` is explicit because execFileSync inherits the parent's stderr by
+      // default, and device-side `dumpsys | grep` writes "Broken pipe" for every
+      // early pipe close - dozens of lines that drown the check output. Captured
+      // stderr still feeds the transport-recovery check below.
+      return execFileSync('adb', argv, {
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
     } catch (error) {
       const detail = error.stderr ?? error.message;
 
@@ -81,6 +89,7 @@ function adb(...args) {
         execFileSync('adb', [...argv.slice(0, 2), 'wait-for-device'], {
           encoding: 'utf8',
           timeout: 20_000,
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch {
         throw new Error(
@@ -445,7 +454,18 @@ async function main() {
   await launch();
 
   await check('identity', async () => {
-    const nodes = dumpUi();
+    // A single dump right after `am start` can land before the header has
+    // rendered, so poll instead of reading once: the first run of v1.4.0 failed
+    // here while the top bar was clearly present a moment later. `waitFor` hands
+    // back whatever the predicate returns, so it returns the node list here.
+    const nodes = await waitFor(
+      (current) =>
+        contains(current, identity.name) && contains(current, `v${identity.version}`)
+          ? current
+          : null,
+      `${identity.name} and v${identity.version} in the top bar`,
+    );
+
     const name = contains(nodes, identity.name);
     const version = contains(nodes, `v${identity.version}`);
     const icon = nodes.find((n) => n.desc.toLowerCase().includes('icon'));
