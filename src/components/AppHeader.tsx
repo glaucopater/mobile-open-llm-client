@@ -28,22 +28,34 @@ export function AppHeader({ label, actions }: { label: string; actions?: ReactNo
       accessibilityRole="header"
     >
       <Image source={APP_ICON} style={styles.icon} accessibilityLabel={`${APP_NAME} icon`} />
+      {/* Every label is single-line on purpose. Measured on the phone: once the bar
+          carries the session token line plus "New chat", the identity block is
+          squeezed to ~73px wide, and an unwrapping `Text` breaks the name into one
+          character per line — a ~1400px tall bar that pushed the transcript and the
+          composer off screen and left the top half blank. */}
       <View style={styles.identity}>
         <View style={styles.nameRow}>
-          <Text style={styles.name}>{APP_NAME}</Text>
+          <Text style={styles.name} numberOfLines={1}>
+            {APP_NAME}
+          </Text>
           {debug ? (
             <Text
               style={styles.debugBadge}
+              numberOfLines={1}
               accessibilityLabel="Debug build: this bundle is served by a dev server"
             >
               {DEBUG_BADGE_LABEL}
             </Text>
           ) : null}
         </View>
-        <Text style={styles.detail}>
+        <Text style={styles.detail} numberOfLines={1}>
           v{APP_VERSION} · {label}
         </Text>
-        {debug ? <Text style={styles.debugDetail}>{debugDetail()}</Text> : null}
+        {debug ? (
+          <Text style={styles.debugDetail} numberOfLines={1}>
+            {debugDetail()}
+          </Text>
+        ) : null}
       </View>
       {actions !== undefined ? <View style={styles.actions}>{actions}</View> : null}
     </View>
@@ -55,6 +67,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    /**
+     * Wraps rather than squeezing. Every label is `numberOfLines={1}`, so an
+     * overflowing row moves the token line to a second row instead of shrinking the
+     * app name to a couple of pixels — and a wrapped row is at most two rows tall,
+     * which is what keeps the transcript and composer on screen.
+     */
+    flexWrap: 'wrap',
     paddingHorizontal: 16,
     paddingBottom: 8,
     backgroundColor: theme.bg,
@@ -66,8 +85,17 @@ const styles = StyleSheet.create({
     height: 28,
     borderRadius: 7,
   },
+  /**
+   * Grows into the leftover room, but never below the width the app name needs.
+   * `flex: 1` alone sets `flexBasis: 0`, so the block starts at zero width and
+   * shrinks to nothing whenever the actions take the row.
+   */
   identity: {
-    flex: 1,
+    flexGrow: 1,
+    /** Never squeezed: the name and the version are the app's identity. */
+    flexShrink: 0,
+    flexBasis: 'auto',
+    minWidth: 120,
     gap: 2,
   },
   /** Wraps rather than squeezing the actions when the badge takes room. */
@@ -111,5 +139,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    /** The token line is the widest thing here; it shrinks instead of the name. */
+    flexShrink: 1,
   },
 });

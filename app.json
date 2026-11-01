@@ -3,7 +3,7 @@
     "name": "Open LLM Client",
     "slug": "mobile-open-llm-client",
     "scheme": "mobile-open-llm-client",
-    "version": "1.13.0",
+    "version": "1.16.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -19,7 +19,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.flagg.mobileopenllmclient",
-      "versionCode": 14
+      "versionCode": 17
     },
     "web": {
       "favicon": "./assets/favicon.png"

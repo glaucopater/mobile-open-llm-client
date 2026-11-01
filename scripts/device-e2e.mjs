@@ -546,28 +546,54 @@ async function waitForOtherActivity(timeout = 8000) {
   }
 }
 
+/**
+ * Navigates to a screen by the label its header prints. The header only exists once
+ * config and the stored transcript have loaded, so a dump taken during that window
+ * has nothing to tap — polling is what makes a `--only=` run stand alone. A control is
+ * tapped only in the top bar: the transcript footer says "Chat" too, and tapping it
+ * does nothing.
+ */
+async function gotoScreen(label) {
+  await clearStack();
+  const header = `v${identity.version} · ${label}`;
+  const startedAt = Date.now();
+  const deadline = startedAt + 12000;
+
+  for (;;) {
+    const nodes = dumpUi();
+
+    if (contains(nodes, header)) {
+      return;
+    }
+
+    const control = nodes.find(
+      (n) => (n.text === label || n.desc === label) && (n.bounds?.top ?? 0) < 320,
+    );
+
+    if (control !== undefined) {
+      await tap(control);
+    }
+
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the ${label} screen never appeared: no header "${header}" (waited ${Date.now() - startedAt}ms)`,
+      );
+    }
+
+    await sleep(400);
+  }
+}
+
 /** Navigates to Settings if not already there, so `--only=` runs stand alone. */
 async function gotoSettings() {
   // The header names the screen. The `Providers (N)` heading sits inside the scroll
   // view and is dropped from a dump taken mid-scroll, so the header is the proof.
-  await clearStack();
-
-  if (!contains(dumpUi(), `v${identity.version} · Settings`)) {
-    await tap(pick(dumpUi(), 'Settings'));
-  }
-
-  await waitFor((nodes) => contains(nodes, `v${identity.version} · Settings`), 'the Settings screen');
+  await gotoScreen('Settings');
 }
 
 /** Back to Chat, likewise. */
 async function gotoChat() {
-  await clearStack();
-
-  if (!contains(dumpUi(), `v${identity.version} · Chat`)) {
-    await tap(pick(dumpUi(), 'Chat'));
-  }
-
-  await waitFor((nodes) => contains(nodes, `v${identity.version} · Chat`), 'the Chat screen');
+  await gotoScreen('Chat');
 }
 
 /** Finds a node whose visible text or label matches, for lines whose length varies. */
@@ -700,6 +726,16 @@ async function main() {
 
     if (!icon) {
       throw new Error('app icon is not in the top bar');
+    }
+
+    // The bar has to stay a bar. On v1.14.0 the version label sat at y 768: once the
+    // bar carried the session token line plus "New chat", the identity block was
+    // squeezed to ~73px wide and the app name wrapped one character per line, making
+    // the bar ~1529px tall and pushing the transcript and composer off screen.
+    if ((version.bounds?.bottom ?? 0) > 320) {
+      throw new Error(
+        `top bar is too tall: "v${identity.version}" ends at y ${version.bounds?.bottom}, so the screen below it is pushed off`,
+      );
     }
 
     return `top bar shows ${identity.name} · v${identity.version} + icon at y ${name.bounds?.top}`;
@@ -1013,7 +1049,7 @@ async function main() {
       // bare "An error occurred." is the bug this probe exists to catch.
       const outcome = await waitFor(
         (nodes) =>
-          findText(nodes, /↑ \d+ sent · ↓ \d+ received/) ??
+          findText(nodes, /↑ [\d,]+ sent · ↓ [\d,]+ received/) ??
           findText(
             nodes,
             /HTTP \d{3}|server said|failed inside the response|blocked by the browser|network error|exceeds the context/i,
@@ -1025,8 +1061,23 @@ async function main() {
       const line = outcome.text || outcome.desc;
       const proof = sent.desc || sent.text || sent.class;
 
-      if (/^↑ \d+ sent/.test(line)) {
-        return `image round trip ok · "${attachment.desc}" from "${picked}" drawn as "${proof}" · ${line}`;
+      // The words the model wrote about the picture: proof it saw the image rather
+      // than answering the text alone. The bubble's role label is the anchor, and
+      // the footer and attachment are skipped because they are not the answer.
+      const after = dumpUi();
+      const anchor = after.findIndex((n) => n.text === 'assistant' || n.desc === 'assistant');
+      const answer =
+        anchor < 0
+          ? undefined
+          : after
+              .slice(anchor + 1)
+              .find((n) => n.package === options.pkg && n.text.length > 1 && !/^(↑|Image|Reasoning)/i.test(n.text));
+
+      // `formatTokens` groups thousands, so the footer reads "↑ 5,900 sent".
+      if (/^↑ [\d,]+ sent/.test(line)) {
+        return `image round trip ok · "${attachment.desc}" from "${picked}" drawn as "${proof}" · ${line}${
+          answer ? ` · answer: "${answer.text.slice(0, 120)}"` : ''
+        }`;
       }
 
       const log = sh('logcat -d -t 200')
@@ -1068,7 +1119,7 @@ async function main() {
           60_000,
         );
         const line = outcome.text || outcome.desc;
-        const usage = findText(dumpUi(), /↑ \d+ sent · ↓ \d+ received/);
+        const usage = findText(dumpUi(), /↑ [\d,]+ sent · ↓ [\d,]+ received/);
         const detail = usage !== undefined ? `${line} (${usage.text})` : line;
 
         if (/^HTTP /.test(line)) {

@@ -183,6 +183,38 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   until a node carries our package, which a picker never does, so it threw "dump never showed
   com.flagg.mobileopenllmclient" while the picker was the active window.
 
+- **A streamed answer was never on screen** — `image-roundtrip` failed with "an answer or a named
+  failure never appeared" while the app bar reported `↑ 3,167 · ↓ 65`: usage existed, so the reply had
+  arrived, but the transcript only re-scrolled when the message *count* changed, and a bubble grows as
+  its text streams. `FlatList` renders only rows inside the viewport, so the newest bubble (answer and
+  token footer) was virtualised away — invisible to the user and to uiautomator. `src/app/index.tsx`
+  now scrolls on `onContentSizeChange` (`followNewest`) and keeps that auto-follow only while the user
+  is at the bottom (`trackScroll`, within 140px of the end), so scrolling up into history is not
+  yanked back down mid-stream. It also scrolls when `status` changes back to `ready`, because the token
+  footer is appended after the last text chunk.
+
+- **Uploading an picture blanked the whole screen** — measured on v1.14.0: the app bar's own container
+  was `[0,0][1084,1529]` (normally `[0,0][1084,286]`), and the `Open LLM Client` and `v1.14.0 · Chat`
+  nodes were gone while the token line, `New chat` and `Settings` were present. Cause: `AppHeader`'s
+  identity block used `flex: 1`, which is `flexBasis: 0`, so it starts at zero width; once the bar gains
+  the session token line (mono, ~625px) plus `New chat`, the leftover is ~73px, an unwrapping `Text`
+  breaks the name into one character per line, and the row becomes ~1400px tall — that is the "crash":
+  nothing is painted in the top band and everything below it, including the composer, is pushed down.
+  Fix: identity is `flexGrow/flexShrink: 1` with `flexBasis: 'auto'` and `minWidth: 120`, the actions
+  shrink instead (`flexShrink: 1`), and every bar label is `numberOfLines={1}` so a narrow bar
+  ellipsizes rather than growing. `FlatList` also takes `flex: 1` so a tall sibling cannot steal the
+  transcript's height. The `identity` check now fails if the version label ends below y 320.
+  Measured after that fix (v1.15.0, 13/13 checks): the bar is back to `[0,0][1084,286]`, the name is at
+  y 150 and the version at y 214. The token line was then ellipsized to ~127px, so the bar wraps
+  (`flexWrap: 'wrap'`) instead of squeezing: the identity stops shrinking (`flexShrink: 0`) and the token
+  line moves to a second row, at most two rows tall.
+
+- **Harness gotcha added by that fix**: `identity.version` is read from `package.json`, so a `--only=`
+  run against an APK built before the bump looks for a header the app never prints ("the Chat screen
+  never appeared" while the trace showed `v1.15.0 · Chat` in every dump). Install the APK the repo
+  describes before running the harness, and `gotoChat`/`gotoSettings` now poll for the header rather
+  than tapping a label taken from a dump made while the app is still loading config and the transcript.
+
 - **v1.6.0 (versionCode 7) failed 8/9, and the cause was the UI, not the harness**: the chat
   screen gated a remote provider with no stored key by returning a centred "This provider needs
   an API key" screen *instead of* chat, so `identity` (app name + version in the bar), every

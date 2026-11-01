@@ -11,6 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { UIMessage } from 'ai';
 
@@ -161,9 +162,35 @@ function ChatSession({
     listRef.current?.scrollToEnd({ animated });
   };
 
+  // The list follows the newest turn only while the user is sitting at the bottom.
+  // A streamed answer grows the transcript as it arrives, and `FlatList` does not
+  // render rows outside the viewport: without following the growth, the newest
+  // bubble — its answer and its token footer — was never on screen at all (measured
+  // on the phone: the app bar reported `↓ 65` while the screen showed only the
+  // user's own bubble).
+  const viewportHeight = useRef(0);
+  const atBottom = useRef(true);
+
+  const trackScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize } = event.nativeEvent;
+    const below = contentSize.height - contentOffset.y - viewportHeight.current;
+
+    atBottom.current = below < 140;
+  };
+
+  // Fires for every growth of the content, including mid-stream text chunks.
+  const followNewest = () => {
+    if (busy || atBottom.current) {
+      scrollToBottom(false);
+    }
+  };
+
+  // Scrolls when a turn is added and again when it settles: the token footer is
+  // appended after the last text chunk, so a scroll keyed on the message count
+  // alone can stop above it and the footer stays out of the viewport.
   useEffect(() => {
     scrollToBottom(true);
-  }, [messages.length]);
+  }, [messages.length, status]);
 
   // The keyboard pads the container (see `useKeyboardPadding`), so the newest
   // turn has to be re-scrolled into the smaller viewport. The padding lands a
@@ -280,7 +307,7 @@ function ChatSession({
             {/* Session totals: what the conversation has cost so far, so a run
                 that quietly eats 100k tokens is visible without opening a message. */}
             {session !== undefined ? (
-              <Text style={styles.sessionUsage}>
+              <Text style={styles.sessionUsage} numberOfLines={1}>
                 ↑ {formatTokens(session.inputTokens)} · ↓ {formatTokens(session.outputTokens)}
                 {sessionCost !== undefined ? ` · ${sessionCost}` : ''}
               </Text>
@@ -347,10 +374,17 @@ function ChatSession({
         ref={listRef}
         data={messages}
         keyExtractor={(message) => message.id}
+        style={styles.list}
         contentContainerStyle={styles.listContent}
         renderItem={({ item }) => <ChatMessage message={item} pricing={model.pricing} />}
         ListEmptyComponent={<Text style={styles.muted}>Nothing yet — ask something.</Text>}
         keyboardShouldPersistTaps="handled"
+        onLayout={(event) => {
+          viewportHeight.current = event.nativeEvent.layout.height;
+        }}
+        onScroll={trackScroll}
+        scrollEventThrottle={100}
+        onContentSizeChange={followNewest}
       />
 
       {/* The classifier names the failure class: a browser-blocked request is not
@@ -524,6 +558,8 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
     paddingHorizontal: 6,
+    /** Ellipsizes rather than wrapping: a wrapped mono line is what made the bar tall. */
+    flexShrink: 1,
   },
   // Touch target stays ≥44dp; the label is small but not faint.
   headerAction: {
@@ -609,6 +645,13 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 4,
     paddingBottom: 24,
+  },
+  /**
+   * The transcript owns the leftover height. Without it the bar or the chip can
+   * take the space and the list is left with a strip too small to show an answer.
+   */
+  list: {
+    flex: 1,
   },
   /**
    * Waiting state, not a failure: amber, the colour the debug badge uses, so it
