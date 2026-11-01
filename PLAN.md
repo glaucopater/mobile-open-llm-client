@@ -136,6 +136,20 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   second tap followed, and a `KEYCODE_BACK` sent while the keyboard is down navigates out of
   the app instead of hiding it.
 
+- **Fat tool results are verified in jest, not on the phone**: `src/__tests__/agent-wire.test.ts`
+  runs the real `ToolLoopAgent` loop with the real guard and a scripted provider
+  (`MockLanguageModelV4` from `ai/test`), so it reads the prompt the guard handed the model. A
+  tool returning 4 × `MAX_TOOL_RESULT_CHARS` arrives on the next step as `type: 'text'` with the
+  serialised payload elided to the cap (`characters truncated`), the tool call and its result stay
+  in one request, and `onTrim` reports `clippedToolResults: 1` — the number the trim chip shows.
+  It cannot be exercised with the shipped tools: `MAX_TOOL_OUTPUT_CHARS` in `src/core/tools.ts`
+  clamps tool output to 8 000 chars, below the guard's 16 000, so `read_file` and `write_file`
+  never reach the cap today. A tool that returns more (an HTTP body, a sqlite dump) would.
+  Two AI SDK v7 shapes the mock needed: `finishReason` is an object (`{ unified: 'tool-calls' }`)
+  and usage is nested (`inputTokens.total`, `outputTokens.text`); flat strings/numbers are dropped,
+  which silently ends the loop after one step. `jest.config.js` allows `@workflow/*` through
+  `transformIgnorePatterns` because `ai` pulls that ESM package in through `@ai-sdk/gateway`.
+
 ## Architecture
 ```
 src/
