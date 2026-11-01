@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -19,6 +20,7 @@ import { keyIsStored } from '../core/keys';
 import type { ModelDescriptor } from '../core/model';
 import { useAgentChat } from '../hooks/useAgentChat';
 import { useConfig } from '../store/config';
+import { theme } from '../theme';
 
 export default function ChatScreen() {
   const loaded = useConfig((state) => state.loaded);
@@ -68,14 +70,32 @@ export default function ChatScreen() {
 function ChatSession({ model }: { model: ModelDescriptor }) {
   const { messages, status, error, sendMessage, stop, trim, reset } = useAgentChat(model);
   const [draft, setDraft] = useState('');
+  const [focused, setFocused] = useState(false);
   const listRef = useRef<FlatList<UIMessage>>(null);
 
   const busy = status === 'streaming' || status === 'submitted';
   const budget = budgetFor(model.contextWindow);
+  const sendDisabled = !busy && draft.trim().length === 0;
 
   useEffect(() => {
     listRef.current?.scrollToEnd({ animated: true });
   }, [messages.length]);
+
+  // The keyboard shrinks the list (adjustResize on Android, padding on iOS), so
+  // the newest turn has to be re-scrolled into the smaller viewport.
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () => {
+      listRef.current?.scrollToEnd({ animated: true });
+    });
+    const hidden = Keyboard.addListener('keyboardDidHide', () => {
+      listRef.current?.scrollToEnd({ animated: false });
+    });
+
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
 
   const send = () => {
     const text = draft.trim();
@@ -85,6 +105,7 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
     }
 
     setDraft('');
+    Keyboard.dismiss();
     sendMessage({ text });
   };
 
@@ -108,11 +129,21 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
         </View>
         <View style={styles.headerActions}>
           {messages.length > 0 ? (
-            <Pressable onPress={reset} disabled={busy}>
-              <Text style={styles.settingsLink}>New chat</Text>
+            <Pressable
+              onPress={reset}
+              disabled={busy}
+              style={({ pressed }) => [
+                styles.headerAction,
+                pressed && !busy ? styles.headerActionPressed : undefined,
+              ]}
+              accessibilityRole="button"
+            >
+              <Text style={busy ? styles.headerActionDisabled : styles.headerActionText}>
+                New chat
+              </Text>
             </Pressable>
           ) : null}
-          <Link href="/settings" style={styles.settingsLink}>
+          <Link href="/settings" style={[styles.headerAction, styles.settingsLink]}>
             Settings
           </Link>
         </View>
@@ -125,26 +156,45 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
         contentContainerStyle={styles.listContent}
         renderItem={({ item }) => <ChatMessage message={item} />}
         ListEmptyComponent={<Text style={styles.muted}>Nothing yet — ask something.</Text>}
+        keyboardShouldPersistTaps="handled"
       />
 
       {error !== undefined ? <Text style={styles.error}>{error.message}</Text> : null}
 
       <View style={styles.composer}>
         <TextInput
-          style={styles.input}
+          style={[styles.input, focused ? styles.inputFocused : undefined]}
           value={draft}
           onChangeText={setDraft}
           placeholder={busy ? 'Answering…' : 'Message'}
+          placeholderTextColor={theme.subtle}
           multiline
           editable={!busy}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onSubmitEditing={send}
+          selectionColor={theme.accent}
+          accessibilityLabel="Message"
         />
         <Pressable
-          style={[styles.button, busy ? styles.buttonStop : undefined]}
+          style={({ pressed }) => [
+            styles.button,
+            busy ? styles.buttonStop : undefined,
+            sendDisabled ? styles.buttonDisabled : undefined,
+            pressed && !sendDisabled
+              ? busy
+                ? styles.buttonStopPressed
+                : styles.buttonPressed
+              : undefined,
+          ]}
           onPress={busy ? stop : send}
-          disabled={!busy && draft.trim().length === 0}
+          disabled={sendDisabled}
+          accessibilityRole="button"
+          accessibilityLabel={busy ? 'Stop answering' : 'Send message'}
         >
-          <Text style={styles.buttonText}>{busy ? 'Stop' : 'Send'}</Text>
+          <Text style={[styles.buttonText, sendDisabled ? styles.buttonTextDisabled : undefined]}>
+            {busy ? 'Stop' : 'Send'}
+          </Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -154,26 +204,34 @@ function ChatSession({ model }: { model: ModelDescriptor }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: theme.bg,
   },
   center: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: theme.bg,
     padding: 24,
     gap: 10,
   },
   title: {
     fontSize: 20,
     fontWeight: '600',
+    color: theme.text,
   },
   muted: {
     fontSize: 14,
-    opacity: 0.6,
+    color: theme.muted,
     paddingHorizontal: 24,
   },
   link: {
     fontSize: 16,
-    color: '#0A7FB5',
+    fontWeight: '600',
+    color: theme.accentText,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
   },
   header: {
     flexDirection: 'row',
@@ -183,75 +241,136 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 8,
     paddingBottom: 6,
+    backgroundColor: theme.bg,
     borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
+    borderBottomColor: theme.border,
   },
   headerText: {
     flex: 1,
-    gap: 2,
-  },
-  settingsLink: {
-    fontSize: 13,
-    color: '#0A7FB5',
+    gap: 3,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
+    gap: 6,
+  },
+  // Touch target stays ≥44dp; the label is small but not faint.
+  headerAction: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    borderRadius: 8,
+  },
+  headerActionPressed: {
+    backgroundColor: theme.accentSoft,
+  },
+  headerActionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
+  },
+  headerActionDisabled: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.subtle,
+  },
+  settingsLink: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   modelLabel: {
     fontSize: 14,
     fontWeight: '600',
+    color: theme.text,
   },
   budget: {
     fontSize: 11,
-    opacity: 0.6,
+    color: theme.muted,
   },
   trimChip: {
     fontSize: 11,
-    color: '#B45309',
+    fontWeight: '600',
+    color: theme.warn,
+    backgroundColor: theme.warnSoft,
+    borderWidth: 1,
+    borderColor: theme.warn,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
   },
   listContent: {
     padding: 16,
     gap: 4,
+    paddingBottom: 24,
   },
   error: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    color: '#B02A30',
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: theme.dangerSoft,
+    borderWidth: 1,
+    borderColor: theme.danger,
+    color: theme.danger,
     fontSize: 13,
+    lineHeight: 18,
   },
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
     padding: 12,
+    backgroundColor: theme.bg,
     borderTopWidth: 1,
-    borderTopColor: '#E8E8E8',
+    borderTopColor: theme.border,
   },
   input: {
     flex: 1,
-    minHeight: 40,
+    minHeight: 44,
     maxHeight: 140,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    borderColor: theme.borderStrong,
+    borderRadius: 12,
+    backgroundColor: theme.card,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 15,
+    lineHeight: 20,
+    color: theme.text,
+  },
+  inputFocused: {
+    borderColor: theme.accent,
+    borderWidth: 2,
   },
   button: {
-    borderRadius: 10,
-    backgroundColor: '#0A7FB5',
+    borderRadius: 12,
+    backgroundColor: theme.accent,
+    minHeight: 44,
+    minWidth: 66,
+    alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 10,
   },
   buttonStop: {
-    backgroundColor: '#B02A30',
+    backgroundColor: theme.danger,
+  },
+  buttonPressed: {
+    backgroundColor: theme.accentPressed,
+  },
+  buttonStopPressed: {
+    backgroundColor: theme.dangerPressed,
+  },
+  buttonDisabled: {
+    backgroundColor: theme.disabled,
   },
   buttonText: {
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '600',
+  },
+  buttonTextDisabled: {
+    color: theme.muted,
   },
 });

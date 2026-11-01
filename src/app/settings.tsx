@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import type { TextInputInstance } from 'react-native';
 
 import { describeConnection, testModelConnection, type ConnectionTest } from '../core/agent';
 import { budgetFor } from '../core/context';
@@ -22,7 +23,9 @@ import {
   type ModelSource,
 } from '../core/model';
 import type { CatalogProvider } from '../core/provider-catalog';
+import { useKeyboardAwareScroll } from '../hooks/useKeyboardAwareScroll';
 import { LOCAL_SERVER_DEFAULT_BASE_URL, useConfig } from '../store/config';
+import { theme } from '../theme';
 
 const DIALECTS: { id: Dialect; label: string }[] = [
   { id: 'openai-chat', label: 'OpenAI chat' },
@@ -44,6 +47,7 @@ export default function SettingsScreen() {
   const select = useConfig((state) => state.select);
   const createProfile = useConfig((state) => state.createProfile);
   const removeModel = useConfig((state) => state.removeModel);
+  const { scrollRef, onScroll, reveal } = useKeyboardAwareScroll();
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const editing = models.find((model) => model.id === editingId);
@@ -81,12 +85,25 @@ export default function SettingsScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView
+      ref={scrollRef}
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+      automaticallyAdjustKeyboardInsets
+      onScroll={onScroll}
+      scrollEventThrottle={16}
+    >
       <Text style={styles.section}>Models</Text>
 
       {models.map((model) => (
         <View key={model.id} style={styles.row}>
-          <Pressable onPress={() => select(model.id)} style={styles.rowMain}>
+          <Pressable
+            onPress={() => select(model.id)}
+            style={({ pressed }) => [styles.rowMain, pressed ? styles.pressed : undefined]}
+            accessibilityRole="button"
+            accessibilityLabel={`Use ${model.label} for chat`}
+          >
             <Text style={styles.label}>{model.label}</Text>
             <Text style={styles.note}>
               {model.dialect} · {model.modelId} · ctx {model.contextWindow ?? 'unset'}
@@ -99,7 +116,9 @@ export default function SettingsScreen() {
               setPickerOpen(false);
               setEditingId(model.id);
             }}
-            style={styles.editButton}
+            style={({ pressed }) => [styles.editButton, pressed ? styles.pressed : undefined]}
+            accessibilityRole="button"
+            accessibilityLabel={`Edit ${model.label}`}
           >
             <Text style={styles.editText}>Edit</Text>
           </Pressable>
@@ -107,21 +126,38 @@ export default function SettingsScreen() {
       ))}
 
       <View style={styles.buttonRow}>
-        <Pressable style={styles.primaryButton} onPress={() => setPickerOpen((open) => !open)}>
+        <Pressable
+          style={({ pressed }) => [styles.primaryButton, pressed ? styles.primaryPressed : undefined]}
+          onPress={() => setPickerOpen((open) => !open)}
+          accessibilityRole="button"
+        >
           <Text style={styles.primaryButtonText}>
             {pickerOpen ? 'Close provider list' : 'Add provider from catalog'}
           </Text>
         </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={addRemoteProvider}>
+        <Pressable
+          style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+          onPress={addRemoteProvider}
+          accessibilityRole="button"
+        >
           <Text style={styles.secondaryButtonText}>Blank remote</Text>
         </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={addLocalServer}>
+        <Pressable
+          style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+          onPress={addLocalServer}
+          accessibilityRole="button"
+        >
           <Text style={styles.secondaryButtonText}>Add LAN server</Text>
         </Pressable>
       </View>
 
       {pickerOpen ? (
-        <ProviderPicker query={query} onQueryChange={setQuery} onPick={addFromCatalog} />
+        <ProviderPicker
+          query={query}
+          onQueryChange={setQuery}
+          onPick={addFromCatalog}
+          reveal={reveal}
+        />
       ) : null}
 
       {editing !== undefined ? (
@@ -131,6 +167,7 @@ export default function SettingsScreen() {
           <ModelEditor
             key={editing.id}
             model={editing}
+            reveal={reveal}
             onSave={(patch) => {
               useConfig.getState().updateModel(editing.id, patch);
               setEditingId(null);
@@ -138,11 +175,12 @@ export default function SettingsScreen() {
             onCancel={() => setEditingId(null)}
           />
           <Pressable
-            style={styles.dangerButton}
+            style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
             onPress={() => {
               removeModel(editing.id);
               setEditingId(null);
             }}
+            accessibilityRole="button"
           >
             <Text style={styles.dangerButtonText}>Delete this model</Text>
           </Pressable>
@@ -173,33 +211,45 @@ function ProviderPicker({
   query,
   onQueryChange,
   onPick,
+  reveal,
 }: {
   query: string;
   onQueryChange: (text: string) => void;
   onPick: (provider: CatalogProvider) => void;
+  reveal: (target: TextInputInstance | null) => void;
 }) {
   const results = searchCatalog(query);
   const total = catalogCount(query);
   const popular = FEATURED_SLUGS.slice(0, 8).map((slug) => catalogProvider(slug));
+  const searchRef = useRef<TextInputInstance>(null);
 
   return (
     <View style={styles.editor}>
       <Text style={styles.section}>Providers ({total})</Text>
 
       <TextInput
+        ref={searchRef}
         style={styles.field}
         value={query}
         onChangeText={onQueryChange}
         placeholder="Search providers, endpoints or models"
+        placeholderTextColor={theme.subtle}
         autoCapitalize="none"
         autoCorrect={false}
+        onFocus={() => reveal(searchRef.current)}
+        selectionColor={theme.accent}
       />
 
       {query.trim().length === 0 ? (
         <View style={styles.chipRow}>
           {popular.map((provider) =>
             provider === undefined ? null : (
-              <Pressable key={provider.slug} style={styles.chip} onPress={() => onPick(provider)}>
+              <Pressable
+                key={provider.slug}
+                style={({ pressed }) => [styles.chip, pressed ? styles.pressed : undefined]}
+                onPress={() => onPick(provider)}
+                accessibilityRole="button"
+              >
                 <Text style={styles.chipText}>{provider.name}</Text>
               </Pressable>
             ),
@@ -208,10 +258,15 @@ function ProviderPicker({
       ) : null}
 
       {results.map((provider) => (
-        <Pressable key={provider.slug} onPress={() => onPick(provider)} style={styles.catalogRow}>
+        <Pressable
+          key={provider.slug}
+          onPress={() => onPick(provider)}
+          style={({ pressed }) => [styles.catalogRow, pressed ? styles.pressed : undefined]}
+          accessibilityRole="button"
+        >
           <Text style={styles.label}>
             {provider.name}
-            {provider.source === 'local-server' ? <Text style={styles.note}> · LAN</Text> : null}
+            {provider.source === 'local-server' ? <Text style={styles.badge}> · LAN</Text> : null}
           </Text>
           <Text style={styles.note}>{provider.baseUrl}</Text>
           <Text style={styles.note}>
@@ -234,10 +289,12 @@ function ModelEditor({
   model,
   onSave,
   onCancel,
+  reveal,
 }: {
   model: ModelDescriptor;
   onSave: (patch: Partial<ModelDescriptor>) => void;
   onCancel: () => void;
+  reveal: (target: TextInputInstance | null) => void;
 }) {
   const [label, setLabel] = useState(model.label);
   const [modelId, setModelId] = useState(model.modelId);
@@ -249,6 +306,7 @@ function ModelEditor({
   const [testResult, setTestResult] = useState<ConnectionTest | null>(null);
   const [testing, setTesting] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const keyRef = useRef<TextInputInstance>(null);
 
   const dialect = model.dialect;
   const source = model.source;
@@ -376,26 +434,47 @@ function ModelEditor({
     <View style={styles.editor}>
       <Text style={styles.section}>{model.id}</Text>
 
-      <Field label="Label" value={label} onChangeText={setLabel} />
-      <Field label="Model id" value={modelId} onChangeText={setModelId} />
+      <Field label="Label" value={label} onChangeText={setLabel} reveal={reveal} />
+      <Field label="Model id" value={modelId} onChangeText={setModelId} reveal={reveal} />
       <Field
         label="Base URL"
         value={baseUrl}
         onChangeText={setBaseUrl}
         autoCapitalize="none"
         autoCorrect={false}
+        reveal={reveal}
       />
-      <Field label="Context window (tokens)" value={contextWindow} onChangeText={setContextWindow} keyboardType="number-pad" />
-      <Field label="API key ref" value={apiKeyRef} onChangeText={setApiKeyRef} autoCapitalize="none" />
+      <Field
+        label="Context window (tokens)"
+        value={contextWindow}
+        onChangeText={setContextWindow}
+        keyboardType="number-pad"
+        reveal={reveal}
+      />
+      <Field
+        label="API key ref"
+        value={apiKeyRef}
+        onChangeText={setApiKeyRef}
+        autoCapitalize="none"
+        reveal={reveal}
+      />
 
       <View style={styles.chipRow}>
         {DIALECTS.map((option) => (
           <Pressable
             key={option.id}
-            style={[styles.chip, dialect === option.id ? styles.chipOn : undefined]}
+            style={({ pressed }) => [
+              styles.chip,
+              dialect === option.id ? styles.chipOn : undefined,
+              pressed ? styles.chipPressed : undefined,
+            ]}
             onPress={() => changeDialect(option.id)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: dialect === option.id }}
           >
-            <Text style={styles.chipText}>{option.label}</Text>
+            <Text style={dialect === option.id ? styles.chipTextOn : styles.chipText}>
+              {option.label}
+            </Text>
           </Pressable>
         ))}
       </View>
@@ -404,10 +483,18 @@ function ModelEditor({
         {SOURCES.map((option) => (
           <Pressable
             key={option.id}
-            style={[styles.chip, source === option.id ? styles.chipOn : undefined]}
+            style={({ pressed }) => [
+              styles.chip,
+              source === option.id ? styles.chipOn : undefined,
+              pressed ? styles.chipPressed : undefined,
+            ]}
             onPress={() => changeSource(option.id)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: source === option.id }}
           >
-            <Text style={styles.chipText}>{option.label}</Text>
+            <Text style={source === option.id ? styles.chipTextOn : styles.chipText}>
+              {option.label}
+            </Text>
           </Pressable>
         ))}
       </View>
@@ -422,16 +509,26 @@ function ModelEditor({
         ).map(([key, text]) => (
           <Pressable
             key={key}
-            style={[styles.chip, capabilities[key] ? styles.chipOn : undefined]}
+            style={({ pressed }) => [
+              styles.chip,
+              capabilities[key] ? styles.chipOn : undefined,
+              pressed ? styles.chipPressed : undefined,
+            ]}
             onPress={() => toggleCapability(key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: capabilities[key] }}
           >
-            <Text style={styles.chipText}>{text}</Text>
+            <Text style={capabilities[key] ? styles.chipTextOn : styles.chipText}>{text}</Text>
           </Pressable>
         ))}
       </View>
 
       <View style={styles.chipRow}>
-        <Pressable style={styles.chip} onPress={resetEndpoint}>
+        <Pressable
+          style={({ pressed }) => [styles.chip, pressed ? styles.pressed : undefined]}
+          onPress={resetEndpoint}
+          accessibilityRole="button"
+        >
           <Text style={styles.chipText}>Use dialect default endpoint</Text>
         </Pressable>
       </View>
@@ -444,11 +541,24 @@ function ModelEditor({
       {model.note !== undefined ? <Text style={styles.warn}>{model.note}</Text> : null}
 
       <View style={styles.buttonRow}>
-        <Pressable style={styles.secondaryButton} onPress={runTest} disabled={testing}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.secondaryButton,
+            testing ? styles.buttonDisabled : undefined,
+            pressed ? styles.pressed : undefined,
+          ]}
+          onPress={runTest}
+          disabled={testing}
+          accessibilityRole="button"
+        >
           <Text style={styles.secondaryButtonText}>{testing ? 'Testing…' : 'Test connection'}</Text>
         </Pressable>
         {testing ? (
-          <Pressable style={styles.dangerButton} onPress={cancelTest}>
+          <Pressable
+            style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
+            onPress={cancelTest}
+            accessibilityRole="button"
+          >
             <Text style={styles.dangerButtonText}>Cancel</Text>
           </Pressable>
         ) : null}
@@ -462,19 +572,37 @@ function ModelEditor({
 
       <View style={styles.keyRow}>
         <TextInput
+          ref={keyRef}
           style={styles.field}
           value={apiKey}
           onChangeText={setKey}
           placeholder={keyStored ? 'Key stored — paste a new one to replace' : 'Paste API key'}
+          placeholderTextColor={theme.subtle}
           secureTextEntry
           autoCapitalize="none"
           autoCorrect={false}
+          onFocus={() => reveal(keyRef.current)}
+          selectionColor={theme.accent}
         />
-        <Pressable style={styles.secondaryButton} onPress={saveKey}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.secondaryButton,
+            apiKey.trim().length === 0 || apiKeyRef.trim().length === 0
+              ? styles.buttonDisabled
+              : undefined,
+            pressed ? styles.pressed : undefined,
+          ]}
+          onPress={saveKey}
+          accessibilityRole="button"
+        >
           <Text style={styles.secondaryButtonText}>Save key</Text>
         </Pressable>
         {keyStored ? (
-          <Pressable style={styles.dangerButton} onPress={clearKey}>
+          <Pressable
+            style={({ pressed }) => [styles.dangerButton, pressed ? styles.dangerPressed : undefined]}
+            onPress={clearKey}
+            accessibilityRole="button"
+          >
             <Text style={styles.dangerButtonText}>Clear</Text>
           </Pressable>
         ) : null}
@@ -482,7 +610,7 @@ function ModelEditor({
 
       <View style={styles.buttonRow}>
         <Pressable
-          style={styles.primaryButton}
+          style={({ pressed }) => [styles.primaryButton, pressed ? styles.primaryPressed : undefined]}
           onPress={() =>
             onSave({
               label: label.trim() || model.label,
@@ -492,10 +620,15 @@ function ModelEditor({
               apiKeyRef: apiKeyRef.trim() || undefined,
             })
           }
+          accessibilityRole="button"
         >
           <Text style={styles.primaryButtonText}>Save changes</Text>
         </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={onCancel}>
+        <Pressable
+          style={({ pressed }) => [styles.secondaryButton, pressed ? styles.pressed : undefined]}
+          onPress={onCancel}
+          accessibilityRole="button"
+        >
           <Text style={styles.secondaryButtonText}>Cancel</Text>
         </Pressable>
       </View>
@@ -510,6 +643,7 @@ function Field({
   keyboardType,
   autoCapitalize,
   autoCorrect,
+  reveal,
 }: {
   label: string;
   value: string;
@@ -517,17 +651,29 @@ function Field({
   keyboardType?: 'number-pad' | 'default';
   autoCapitalize?: 'none' | 'sentences';
   autoCorrect?: boolean;
+  reveal: (target: TextInputInstance | null) => void;
 }) {
+  const inputRef = useRef<TextInputInstance>(null);
+  const [focused, setFocused] = useState(false);
+
   return (
     <View style={styles.fieldRow}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <TextInput
-        style={styles.field}
+        ref={inputRef}
+        style={[styles.field, focused ? styles.fieldFocused : undefined]}
         value={value}
         onChangeText={onChangeText}
         keyboardType={keyboardType ?? 'default'}
         autoCapitalize={autoCapitalize ?? 'sentences'}
         autoCorrect={autoCorrect ?? true}
+        accessibilityLabel={label}
+        selectionColor={theme.accent}
+        onFocus={() => {
+          setFocused(true);
+          reveal(inputRef.current);
+        }}
+        onBlur={() => setFocused(false)}
       />
     </View>
   );
@@ -536,6 +682,7 @@ function Field({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: theme.bg,
   },
   content: {
     padding: 16,
@@ -545,49 +692,96 @@ const styles = StyleSheet.create({
   section: {
     fontSize: 14,
     fontWeight: '700',
+    color: theme.text,
+    letterSpacing: 0.4,
     marginTop: 8,
+  },
+  /** Pressed feedback: a tinted fill, since colour alone is hard to see on tap. */
+  pressed: {
+    backgroundColor: theme.accentSoft,
+    borderColor: theme.accent,
+  },
+  /** Pressed feedback for filled controls — the fill darkens, white text stays AA. */
+  primaryPressed: {
+    backgroundColor: theme.accentPressed,
+  },
+  dangerPressed: {
+    backgroundColor: theme.dangerPressed,
+  },
+  /** Chips keep their fill when selected, so they thicken instead of tinting. */
+  chipPressed: {
+    borderWidth: 2,
+    borderColor: theme.accent,
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#E8E8E8',
+    borderBottomColor: theme.border,
     paddingBottom: 8,
   },
   rowMain: {
     flex: 1,
     gap: 2,
+    padding: 4,
+    borderRadius: 8,
   },
   label: {
     fontSize: 15,
     fontWeight: '600',
+    color: theme.text,
   },
   note: {
     fontSize: 12,
-    opacity: 0.65,
+    color: theme.muted,
+  },
+  badge: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   preview: {
     fontSize: 12,
     fontFamily: 'monospace',
-    opacity: 0.75,
+    color: theme.muted,
   },
   testOk: {
     fontSize: 12,
-    color: '#15803D',
+    color: theme.ok,
+    backgroundColor: theme.okSoft,
+    borderWidth: 1,
+    borderColor: theme.ok,
+    borderRadius: 8,
+    padding: 8,
   },
   testFail: {
     fontSize: 12,
-    color: '#B02A30',
+    color: theme.danger,
+    backgroundColor: theme.dangerSoft,
+    borderWidth: 1,
+    borderColor: theme.danger,
+    borderRadius: 8,
+    padding: 8,
   },
   selected: {
     fontSize: 12,
-    color: '#0A7FB5',
+    fontWeight: '600',
+    color: theme.accentText,
+    backgroundColor: theme.accentSoft,
+    borderColor: theme.accent,
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    alignSelf: 'flex-start',
+    marginTop: 2,
   },
   editButton: {
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
+    backgroundColor: theme.card,
     // Touch target stays ≥44dp so the button is hittable on small screens.
     minWidth: 48,
     minHeight: 44,
@@ -597,21 +791,31 @@ const styles = StyleSheet.create({
   },
   editText: {
     fontSize: 13,
+    fontWeight: '600',
+    color: theme.accentText,
   },
   catalogRow: {
     gap: 2,
     borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
-    paddingBottom: 6,
+    borderBottomColor: theme.border,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderRadius: 8,
   },
   warn: {
     fontSize: 12,
-    color: '#8A5A00',
+    color: theme.warn,
+    backgroundColor: theme.warnSoft,
+    borderWidth: 1,
+    borderColor: theme.warn,
+    borderRadius: 8,
+    padding: 8,
   },
   editor: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
     borderRadius: 10,
+    backgroundColor: theme.surface,
     padding: 12,
     gap: 8,
   },
@@ -621,15 +825,22 @@ const styles = StyleSheet.create({
   fieldLabel: {
     fontSize: 12,
     fontWeight: '600',
-    opacity: 0.7,
+    color: theme.text,
   },
   field: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
     borderRadius: 8,
+    backgroundColor: theme.card,
+    minHeight: 44,
     paddingHorizontal: 10,
     paddingVertical: 8,
     fontSize: 14,
+    color: theme.text,
+  },
+  fieldFocused: {
+    borderColor: theme.accent,
+    borderWidth: 2,
   },
   chipRow: {
     flexDirection: 'row',
@@ -639,16 +850,26 @@ const styles = StyleSheet.create({
   chip: {
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
+    backgroundColor: theme.card,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 8,
+    minHeight: 40,
+    justifyContent: 'center',
   },
   chipOn: {
-    backgroundColor: '#E6F4FE',
-    borderColor: '#0A7FB5',
+    backgroundColor: theme.accent,
+    borderColor: theme.accent,
   },
   chipText: {
     fontSize: 12,
+    fontWeight: '600',
+    color: theme.text,
+  },
+  chipTextOn: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   keyRow: {
     flexDirection: 'row',
@@ -657,11 +878,12 @@ const styles = StyleSheet.create({
   },
   buttonRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
   primaryButton: {
     borderRadius: 8,
-    backgroundColor: '#0A7FB5',
+    backgroundColor: theme.accent,
     minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
@@ -676,7 +898,8 @@ const styles = StyleSheet.create({
   secondaryButton: {
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
+    backgroundColor: theme.card,
     minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
@@ -685,10 +908,16 @@ const styles = StyleSheet.create({
   },
   secondaryButtonText: {
     fontSize: 14,
+    fontWeight: '600',
+    color: theme.text,
+  },
+  buttonDisabled: {
+    backgroundColor: theme.disabled,
+    borderColor: theme.border,
   },
   dangerButton: {
     borderRadius: 8,
-    backgroundColor: '#B02A30',
+    backgroundColor: theme.danger,
     minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
@@ -702,11 +931,12 @@ const styles = StyleSheet.create({
   },
   footer: {
     fontSize: 12,
-    opacity: 0.6,
     lineHeight: 17,
+    color: theme.muted,
   },
   code: {
     fontFamily: 'monospace',
     fontSize: 11,
+    color: theme.text,
   },
 });

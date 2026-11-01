@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { primeKeyCache } from '../core/keys';
 import { useConfig } from '../store/config';
+import { theme } from '../theme';
 
 export default function RootLayout() {
   const load = useConfig((state) => state.load);
@@ -21,7 +22,16 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <Stack>
+      <Stack
+        screenOptions={{
+          // The screens paint the same white as the header, so the seam is a
+          // hairline rather than a shadow.
+          headerStyle: { backgroundColor: theme.bg },
+          headerTitleStyle: { color: theme.text, fontWeight: '600' },
+          headerTintColor: theme.accentText,
+          headerShadowVisible: false,
+        }}
+      >
         <Stack.Screen name="index" options={{ title: 'Chat' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
       </Stack>

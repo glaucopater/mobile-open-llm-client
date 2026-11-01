@@ -8,6 +8,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { UIMessage } from 'ai';
 
 import { elideText } from '../core/context';
+import { theme } from '../theme';
 
 /** Long payloads are shown clipped, the same way the guard clips them. */
 const MAX_RENDERED_CHARS = 1_200;
@@ -29,6 +30,15 @@ const TOOL_STATE_LABEL: Record<string, string> = {
   'approval-requested': 'waiting for approval',
   'output-available': 'done',
   'output-error': 'failed',
+};
+
+/** State is colour-coded as well as worded: running, done and failed read apart at a glance. */
+const TOOL_STATE_COLOR: Record<string, string> = {
+  'input-streaming': theme.accentText,
+  'input-available': theme.accentText,
+  'approval-requested': theme.warn,
+  'output-available': theme.ok,
+  'output-error': theme.danger,
 };
 
 function preview(value: unknown): string {
@@ -87,12 +97,16 @@ function PartView({ part }: { part: UIMessage['parts'][number] }) {
         ? preview(toolPart.output)
         : preview(toolPart.input);
 
+    const stateColor = TOOL_STATE_COLOR[toolPart.state ?? ''] ?? theme.muted;
+
     return (
       <View style={styles.tool}>
-        <Text style={styles.toolName}>{toolNameOf(toolPart)}</Text>
-        <Text style={styles.toolState}>
-          {TOOL_STATE_LABEL[toolPart.state ?? ''] ?? toolPart.state ?? 'pending'}
-        </Text>
+        <View style={styles.toolHead}>
+          <Text style={styles.toolName}>{toolNameOf(toolPart)}</Text>
+          <Text style={[styles.toolState, { color: stateColor }]}>
+            {TOOL_STATE_LABEL[toolPart.state ?? ''] ?? toolPart.state ?? 'pending'}
+          </Text>
+        </View>
         {body.length > 0 ? <Text style={styles.toolBody}>{body}</Text> : null}
       </View>
     );
@@ -130,65 +144,79 @@ const styles = StyleSheet.create({
   bubble: {
     maxWidth: '88%',
     borderRadius: 12,
+    borderWidth: 1,
     padding: 12,
     gap: 8,
   },
   bubbleUser: {
-    backgroundColor: '#E6F4FE',
+    backgroundColor: theme.surfaceAlt,
+    borderColor: theme.border,
   },
   bubbleAssistant: {
-    backgroundColor: '#F4F4F4',
+    backgroundColor: theme.surface,
+    borderColor: theme.border,
   },
   role: {
     fontSize: 11,
     fontWeight: '600',
-    opacity: 0.55,
+    color: theme.muted,
+    letterSpacing: 0.4,
   },
   text: {
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 22,
+    color: theme.text,
   },
   reasoning: {
     borderLeftWidth: 3,
-    borderLeftColor: '#B0B0B0',
+    borderLeftColor: theme.border,
     paddingLeft: 8,
     gap: 4,
   },
   reasoningLabel: {
     fontSize: 11,
     fontWeight: '600',
-    opacity: 0.6,
+    color: theme.muted,
+    letterSpacing: 0.4,
   },
   reasoningText: {
     fontSize: 13,
     fontStyle: 'italic',
-    opacity: 0.75,
     lineHeight: 18,
+    color: theme.muted,
   },
   tool: {
     borderRadius: 8,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: theme.card,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: theme.borderStrong,
     padding: 8,
     gap: 4,
+  },
+  toolHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
   },
   toolName: {
     fontSize: 13,
     fontWeight: '600',
     fontFamily: 'monospace',
+    color: theme.text,
   },
   toolState: {
     fontSize: 12,
-    opacity: 0.6,
+    fontWeight: '600',
   },
   toolBody: {
     fontSize: 12,
     fontFamily: 'monospace',
-    color: '#333333',
+    lineHeight: 17,
+    color: theme.text,
   },
   meta: {
     fontSize: 12,
-    opacity: 0.6,
+    color: theme.muted,
   },
 });
