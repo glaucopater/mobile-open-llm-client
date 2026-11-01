@@ -8,6 +8,7 @@
  */
 import * as Device from 'expo-device';
 import { File, Paths } from 'expo-file-system';
+import { Platform } from 'react-native';
 import { tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 
@@ -22,6 +23,12 @@ function clamp(value: string): string {
  * a model cannot walk outside the app sandbox.
  */
 function resolveDocumentFile(path: string): File {
+  if (Platform.OS === 'web') {
+    // expo-file-system has no web implementation, so the file tools would fail
+    // with an opaque constructor warning.
+    throw new Error('File tools are not available in the web build.');
+  }
+
   const clean = path.replace(/^[/\\]+/, '');
 
   if (clean.includes('..')) {
@@ -35,7 +42,17 @@ export const getDeviceInfoTool = tool({
   description: 'Reads the device this app is running on: brand, model, OS, memory, real-device flag.',
   inputSchema: z.object({}),
   execute: async () => {
-    const maxMemory = Device.totalMemory ?? (await Device.getMaxMemoryAsync().catch(() => null));
+    // The web build reads memory from `navigator.deviceMemory` and has no
+    // `getMaxMemoryAsync`, so the async probe only runs when the sync value is absent.
+    let maxMemory: number | null = Device.totalMemory ?? null;
+
+    if (maxMemory === null) {
+      try {
+        maxMemory = await Device.getMaxMemoryAsync();
+      } catch {
+        maxMemory = null;
+      }
+    }
 
     return {
       isDevice: Device.isDevice,
@@ -44,8 +61,9 @@ export const getDeviceInfoTool = tool({
       designName: Device.designName ?? 'unknown',
       productName: Device.productName ?? 'unknown',
       deviceType: Device.deviceType ?? 'unknown',
-      osName: Device.osName ?? 'unknown',
-      osVersion: Device.osVersion ?? 'unknown',
+      // Web reports '' rather than null for OS fields.
+      osName: Device.osName || 'unknown',
+      osVersion: Device.osVersion || 'unknown',
       platformApiLevel: Device.platformApiLevel,
       memoryMb: maxMemory === null ? null : Math.round(maxMemory / 1024 / 1024),
     };

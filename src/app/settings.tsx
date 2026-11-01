@@ -188,15 +188,17 @@ export default function SettingsScreen() {
       ) : null}
 
       <Text style={styles.footer}>
-        Keys are stored in SecureStore, never in SQLite. Auth follows the dialect: OpenAI-style
-        dialects send <Text style={styles.code}>Authorization: Bearer</Text>, Anthropic sends
+        Keys are kept in SecureStore (in the web dev build, unencrypted localStorage), never in
+        SQLite. Auth follows the dialect: OpenAI-style dialects send{' '}
+        <Text style={styles.code}>Authorization: Bearer</Text>, Anthropic sends{' '}
         <Text style={styles.code}>x-api-key</Text>, Gemini puts the key in the query. Test
         connection probes the endpoint with the typed key without storing it. The context window you
         set here is what the request guard budgets against — set it to the server&apos;s ctx size. For
         a LAN server bind it to <Text style={styles.code}>0.0.0.0</Text> and use the host&apos;s LAN
-        address, or tunnel the port with <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>
-        (emulator, or a real phone over USB). The provider catalog comes
-        from models.dev and is refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
+        address, or tunnel the port with{' '}
+        <Text style={styles.code}>adb reverse tcp:11434 tcp:11434</Text>{' '}
+        (emulator, or a real phone over USB). The provider catalog comes from models.dev and is
+        refreshed with <Text style={styles.code}>yarn providers:sync</Text>.
       </Text>
     </ScrollView>
   );

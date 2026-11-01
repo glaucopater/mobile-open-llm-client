@@ -29,6 +29,29 @@ dev: @babel/core@7 (Expo pins 7.x; babel 8 breaks the preset), @react-native/met
 not installed yet: react-native-blob-util (phase 4), react-native-markdown-display
     (its peer set conflicts with expo-router's web deps — revisit per phase)
 later phase: @react-native-ai/llama + llama.rn, @react-native-ai/apple, @react-native-ai/adk
+web dev target: react-native-web@0.21, @expo/metro-runtime (npx expo install)
+```
+
+## Web target (dev/test only, never shipped)
+```
+yarn web        # expo start --web, app at http://localhost:8081
+yarn web:check  # node scripts/web-ui-check.mjs <route> --out=<png> [--type=<text>] [--click-text=<label>]
+                # drives headless Edge over CDP: waits for mount, dumps console, phone-sized shot
+
+Limits found by running it, not assumed:
+- expo-sqlite cannot run on web: its WASM worker is fetched from
+  `new URL('./worker', location.href)`, which Metro answers with index.html, and the
+  OPFS VFS needs COOP/COEP headers the dev server cannot add. Config therefore goes to
+  localStorage via src/store/db.ts + src/store/webStorage.ts (memory fallback when
+  storage is blocked). metro.config.js adds `wasm` to assetExts so the import still bundles.
+- expo-secure-store ships an empty web module, so src/core/keys.ts falls back to
+  localStorage there (plaintext, web build only).
+- expo-file-system has no web implementation: read_file/write_file report
+  "File tools are not available in the web build". get_device_info works (ua-parser).
+- react-native-web emits no keyboardDidShow/DidHide, so keyboard avoidance can only be
+  verified on a real device; the web view verifies layout, contrast and round trips.
+- LAN Ollama works from the browser at http://localhost:11434/v1 (Ollama allows the
+  localhost origin by default), streaming and reasoning included.
 ```
 
 ## Architecture
