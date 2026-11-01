@@ -20,6 +20,13 @@ const SCHEMA = `
     key TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS transcript (
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+  );
 `;
 
 /** Namespace so web storage cannot collide with other apps on the same origin. */

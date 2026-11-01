@@ -11,6 +11,7 @@ import { isStepCount, ToolLoopAgent, wrapLanguageModel, type ToolSet } from 'ai'
 import { cachedApiKey } from './keys';
 import { contextWindowGuard, elideText, ContextOverflowError, type TrimReport } from './context';
 import { describeModel, endpointPreview, type ModelDescriptor } from './model';
+import { describeTransportFailure, isTransportFailure } from './network-error';
 import { createLanguageModel } from './provider';
 
 export const MAX_STEPS = 8;
@@ -47,14 +48,18 @@ export function createAgent(
 ): ToolLoopAgent {
   const apiKey = options.apiKey ?? cachedApiKey(model.apiKeyRef);
 
-  if (model.apiKeyRef !== undefined && apiKey === undefined && model.source === 'remote') {
-    throw new Error(`${describeModel(model)} needs an API key. Add it in Settings.`);
-  }
-
+  // A missing credential is not a construction failure. Chat builds the agent
+  // during render, so throwing here crashed the whole screen — the header, the
+  // model chip and Settings were gone and the phone was stuck on a dead view.
+  // `ChatSession` disables Send and names the missing key instead, and
+  // `testModelConnection` reports it before probing.
   const languageModel = wrapLanguageModel({
     model: createLanguageModel(model, apiKey),
     middleware: contextWindowGuard({
       contextWindow: model.contextWindow,
+      // The model's own answer limit caps the budget, so a small-output model is
+      // never asked for more than it can return.
+      maxOutputTokens: model.maxOutputTokens,
       onTrim: options.onTrim,
     }),
   });
@@ -80,30 +85,80 @@ export interface ConnectionTest {
 }
 
 /**
- * A request that never reached the server. `expo/fetch` rejects with a bare
- * "Failed to fetch" for DNS, TLS and dropped connections, which tells the user
- * nothing; the endpoint is printed next to it, so name the failure class here.
+ * Turns any failure into one line a settings screen can show. A status-less
+ * failure is classified by `core/network-error.ts`, because "Failed to fetch"
+ * is a browser-blocked cross-origin request just as often as a dropped socket.
  */
-const TRANSPORT_FAILURE =
-  /failed to fetch|network (request )?failed|connection (refused|reset|closed|timed out)|unable to resolve host|ssl|tls|handshake/i;
-
-/** Turns any failure into one line a settings screen can show. */
-export function describeError(error: unknown): string {
+export function describeError(
+  error: unknown,
+  baseUrl?: string,
+  /** A zero-cost model: a 403 is the tier being restricted, not a bad credential. */
+  options: { freeModel?: boolean } = {},
+): string {
   if (error instanceof ContextOverflowError) {
     return error.message;
   }
 
-  // APICallError carries the HTTP status; duck-typed so this stays import-cheap.
-  const apiError = error as { statusCode?: number; message?: string };
+  // APICallError carries the HTTP status and the vendor's own body; duck-typed so
+  // this stays import-cheap.
+  const apiError = error as {
+    statusCode?: number;
+    message?: string;
+    cause?: unknown;
+    responseBody?: string;
+  };
   const raw = apiError.message ?? String(error);
+  const cause = apiError.cause;
+  const causeText = cause instanceof Error ? cause.message : undefined;
+  // Collapsed to one line: a JSON error body arrives with newlines, which the
+  // banner would render as a paragraph.
+  const body =
+    typeof apiError.responseBody === 'string'
+      ? apiError.responseBody.replace(/\s+/g, ' ').trim()
+      : undefined;
 
-  if (apiError.statusCode === undefined && TRANSPORT_FAILURE.test(raw)) {
-    return elideText(`network error · the request never reached the server (${raw})`, 220);
+  let detail = raw;
+
+  if (causeText !== undefined && !detail.includes(causeText)) {
+    detail = `${detail} · ${causeText}`;
+  }
+
+  // The body is the only text that names a rejected request shape (an image the
+  // endpoint does not accept, a bad model id); the wrapper message alone does not.
+  if (body !== undefined && body.length > 0 && !detail.includes(body)) {
+    detail = `${detail} · server said: ${body}`;
+  }
+
+  // Idempotent: a line that already names its class is passed through unchanged,
+  // because the banner re-describes the text the transport put in the error chunk.
+  const alreadyClassified = /^(network error|blocked by the browser|HTTP \d{3})/.test(detail);
+
+  if (apiError.statusCode === undefined && isTransportFailure(detail) && !alreadyClassified) {
+    return describeTransportFailure(detail, baseUrl ?? '');
   }
 
   const status = typeof apiError.statusCode === 'number' ? `HTTP ${apiError.statusCode} · ` : '';
 
-  return elideText(status + raw, 220);
+  // No status field usually means the failure arrived inside an already-accepted
+  // stream: the endpoint answered 200 and then failed mid-body, which is not a
+  // network fault. A message that already names a status or a class is left alone.
+  const namesAStatus = /\bHTTP \d{3}\b|^\d{3}\b/.test(detail);
+  const streamed =
+    apiError.statusCode === undefined &&
+    !namesAStatus &&
+    !alreadyClassified &&
+    !detail.includes('failed inside the response')
+      ? ` · accepted at ${baseUrl ?? 'the endpoint'} and failed inside the response`
+      : '';
+  const line = status + detail + streamed;
+
+  // A 403 on a free model is the gateway restricting its free tier. Without this
+  // line the user checks the key again, which is the wrong thing to check.
+  if (apiError.statusCode === 403 && options.freeModel === true) {
+    return elideText(`${line} · the free tier is restricted by the gateway, not your key`, 260);
+  }
+
+  return elideText(line, 220);
 }
 
 export interface ConnectionTestOptions {
@@ -125,6 +180,18 @@ export async function testModelConnection(
   const startedAt = Date.now();
 
   try {
+    // An empty credential would reach the vendor as an unauthenticated request,
+    // which answers with a status the user cannot act on; name it here instead.
+    const apiKey = options.apiKey ?? cachedApiKey(model.apiKeyRef);
+
+    if (model.apiKeyRef !== undefined && apiKey === undefined && model.source === 'remote') {
+      return {
+        ok: false,
+        latencyMs: 0,
+        error: `${describeModel(model)} needs an API key. Add it in Settings.`,
+      };
+    }
+
     const agent = createAgent(model, {
       maxSteps: 1,
       apiKey: options.apiKey,
@@ -145,7 +212,13 @@ export async function testModelConnection(
       outputTokens: result.usage?.outputTokens,
     };
   } catch (error) {
-    return { ok: false, latencyMs: Date.now() - startedAt, error: describeError(error) };
+    // The endpoint is what separates a blocked cross-origin request from a dead
+    // socket, so the classifier gets it.
+    return {
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      error: describeError(error, model.baseUrl, { freeModel: model.free }),
+    };
   }
 }
 

@@ -7,8 +7,9 @@
  * wants a client-owned `User-Agent` instead of a generic HTTP-library name.
  *
  * The id is minted once and stored, so restarting the app keeps the same
- * conversation identity. Once transcript persistence exists, each stored
- * conversation should get its own id instead of this app-wide one.
+ * conversation identity. Each stored conversation has its own id: "New chat"
+ * mints a fresh one and its transcript is written under it, so the gateway's
+ * prompt cache is not reused across unrelated chats.
  */
 import { getJson, setJson } from '../store/db';
 import { APP_NAME, APP_VERSION } from '../version';
@@ -41,7 +42,7 @@ export function needsSessionHeader(baseUrl: string): boolean {
 let sessionId: string | null = null;
 
 /** `ses_...` shaped like the ids the gateway documents. Math.random is enough here. */
-function newSessionId(): string {
+export function mintSessionId(): string {
   const random = Array.from({ length: 12 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
 
   return `ses_${Date.now().toString(36)}_${random}`;
@@ -55,7 +56,7 @@ function newSessionId(): string {
 export async function loadConversationSessionId(): Promise<string> {
   const stored = await getJson<{ id?: string }>(SESSION_STORAGE_KEY);
   const id =
-    stored?.id !== undefined && stored.id.length > 0 ? stored.id : (sessionId ?? newSessionId());
+    stored?.id !== undefined && stored.id.length > 0 ? stored.id : (sessionId ?? mintSessionId());
 
   sessionId = id;
 
@@ -66,9 +67,21 @@ export async function loadConversationSessionId(): Promise<string> {
   return id;
 }
 
+/**
+ * Starts a fresh conversation: a new id is minted, stored and returned, so the
+ * transcript written under the old id stays on disk while the new chat begins
+ * empty. Sync afterwards: `conversationSessionId()` reads the in-memory value.
+ */
+export async function startNewConversation(): Promise<string> {
+  sessionId = mintSessionId();
+  await setJson(SESSION_STORAGE_KEY, { id: sessionId });
+
+  return sessionId;
+}
+
 /** Sync read for provider construction; falls back to a freshly minted id. */
 export function conversationSessionId(): string {
-  sessionId ??= newSessionId();
+  sessionId ??= mintSessionId();
 
   return sessionId;
 }

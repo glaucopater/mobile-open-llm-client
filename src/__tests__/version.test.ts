@@ -1,4 +1,4 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it } from 'vitest';
 
 import appConfig from '../../app.json';
 import packageJson from '../../package.json';

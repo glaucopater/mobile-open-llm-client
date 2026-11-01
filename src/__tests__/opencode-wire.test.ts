@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_CAPABILITIES, type ModelDescriptor } from '../core/model';
 import { createLanguageModel } from '../core/provider';
@@ -8,9 +8,8 @@ import { CLIENT_USER_AGENT, SESSION_HEADER, loadConversationSessionId } from '..
 // The point of this test is what leaves the device, so the real
 // `@ai-sdk/openai-compatible` adapter runs against a stub fetch instead of being
 // mocked: OpenCode answers `400 MissingSessionID` unless the header is on the
-// outgoing request, which only the wire shows. `jest.mock` is hoisted above the
-// imports; mock variables must be `mock`-prefixed and read in deferred bodies.
-const mockFetch = jest.fn(async (_url: string, init: RequestInit): Promise<Response> =>
+// outgoing request, which only the wire shows.
+const mockFetch = vi.fn(async (_url: string, init: RequestInit): Promise<Response> =>
   new Response(
     [
       'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n',
@@ -21,7 +20,7 @@ const mockFetch = jest.fn(async (_url: string, init: RequestInit): Promise<Respo
   ),
 );
 
-jest.mock('../store/db', () => ({
+vi.mock('../store/db', () => ({
   getJson: async () => ({ id: 'ses_stored' }),
   setJson: async () => {},
   deleteKey: async () => {},
@@ -37,6 +36,8 @@ function descriptor(overrides: Partial<ModelDescriptor> = {}): ModelDescriptor {
   return {
     id: 'opencode-go:deepseek-v4.1-flash',
     label: 'OpenCode Go',
+    providerLabel: 'OpenCode Go',
+    modelLabel: 'DeepSeek V4.1 Flash',
     dialect: 'openai-compatible',
     modelId: 'deepseek-v4.1-flash',
     baseUrl: 'https://opencode.ai/inference/go/openai/v1',

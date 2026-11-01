@@ -1,12 +1,12 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getApiKey, normalizeApiKey, setApiKey } from '../core/keys';
 
-// `expo-secure-store` is native, so the store is stubbed with a map. Mock
-// variables must be `mock`-prefixed because jest.mock is hoisted above imports.
+// `expo-secure-store` is native, so the store is stubbed with a map. The map is
+// built at import time, but the stub only reads it inside its own call bodies.
 const mockStore = new Map<string, string>();
 
-jest.mock('expo-secure-store', () => ({
+vi.mock('expo-secure-store', () => ({
   isAvailableAsync: async () => true,
   getItemAsync: async (key: string) => mockStore.get(key) ?? null,
   setItemAsync: async (key: string, value: string) => {

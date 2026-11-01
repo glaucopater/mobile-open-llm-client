@@ -1,25 +1,25 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { describeConnection, describeError, testModelConnection } from '../core/agent';
 import { DEFAULT_CAPABILITIES, type ModelDescriptor } from '../core/model';
 import { primeKeyCache } from '../core/keys';
 
 // The AI SDK and SecureStore are ESM/native respectively, so both are stubbed:
-// these tests assert our probe wiring, not vendor internals. `jest.mock` is
-// hoisted above the imports; mock variables must be `mock`-prefixed and
-// referenced only inside deferred call bodies.
-const mockGenerate = jest.fn(
+// these tests assert our probe wiring, not vendor internals. `vi.mock` is
+// hoisted above the imports; mock variables are read only inside deferred call
+// bodies, so they are initialized before any factory runs.
+const mockGenerate = vi.fn(
   (options: unknown): PromiseLike<unknown> => Promise.resolve({ options }),
 );
-const mockCreateOpenAI = jest.fn((settings: unknown) => settings);
+const mockCreateOpenAI = vi.fn((settings: unknown) => settings);
 
-jest.mock('../store/db', () => ({
+vi.mock('../store/db', () => ({
   getJson: async () => ({ id: 'ses_test' }),
   setJson: async () => {},
   deleteKey: async () => {},
 }));
 
-jest.mock('ai', () => ({
+vi.mock('ai', () => ({
   isStepCount: (steps: number) => ({ stopAfter: steps }),
   wrapLanguageModel: ({ model }: { model: unknown }) => ({ guarded: model }),
   ToolLoopAgent: class {
@@ -35,27 +35,27 @@ jest.mock('ai', () => ({
   },
 }));
 
-jest.mock('expo-secure-store', () => ({
+vi.mock('expo-secure-store', () => ({
   isAvailableAsync: async () => true,
   getItemAsync: async (key: string) => (key === 'cached-key' ? 'typed-secret' : null),
   setItemAsync: async () => {},
   deleteItemAsync: async () => {},
 }));
 
-jest.mock('@ai-sdk/openai', () => ({
+vi.mock('@ai-sdk/openai', () => ({
   createOpenAI: (settings: unknown) => {
     mockCreateOpenAI(settings);
 
     return { chat: (modelId: string) => ({ id: `openai-chat:${modelId}` }) };
   },
 }));
-jest.mock('@ai-sdk/anthropic', () => ({
+vi.mock('@ai-sdk/anthropic', () => ({
   createAnthropic: () => ({ messages: (modelId: string) => ({ id: `anthropic:${modelId}` }) }),
 }));
-jest.mock('@ai-sdk/google', () => ({
+vi.mock('@ai-sdk/google', () => ({
   createGoogleGenerativeAI: () => (modelId: string) => ({ id: `google:${modelId}` }),
 }));
-jest.mock('@ai-sdk/openai-compatible', () => ({
+vi.mock('@ai-sdk/openai-compatible', () => ({
   createOpenAICompatible: () => ({ chatModel: (modelId: string) => ({ id: `compat:${modelId}` }) }),
 }));
 
@@ -63,6 +63,8 @@ function descriptor(overrides: Partial<ModelDescriptor> = {}): ModelDescriptor {
   return {
     id: 'openai:gpt-5-mini',
     label: 'Gateway',
+    providerLabel: 'Gateway',
+    modelLabel: 'GPT-5 Mini',
     dialect: 'openai-chat',
     modelId: 'gpt-5-mini',
     baseUrl: 'https://gateway.example/v1',
@@ -182,5 +184,16 @@ describe('describeError', () => {
     expect(describeError(new Error('Unable to resolve host'))).toContain('network error');
     // An HTTP status is a response, not a transport failure.
     expect(describeError({ statusCode: 502, message: 'Bad gateway' })).toBe('HTTP 502 · Bad gateway');
+  });
+
+  it('blames the tier, not the key, when a free model is refused', () => {
+    const forbidden = { statusCode: 403, message: 'Forbidden' };
+
+    expect(describeError(forbidden)).toBe('HTTP 403 · Forbidden');
+    // On a zero-cost model the 403 is the gateway restricting its free tier, so
+    // re-checking the credential is the wrong thing to do.
+    expect(describeError(forbidden, undefined, { freeModel: true })).toBe(
+      'HTTP 403 · Forbidden · the free tier is restricted by the gateway, not your key',
+    );
   });
 });

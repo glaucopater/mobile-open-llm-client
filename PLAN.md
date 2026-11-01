@@ -24,7 +24,7 @@ react-native-safe-area-context, react-native-screens,
 react-native-gesture-handler, react-native-reanimated, react-native-worklets,
 zustand
 dev: @babel/core@7 (Expo pins 7.x; babel 8 breaks the preset), @react-native/metro-config,
-     @react-native/jest-preset, jest, eslint, eslint-config-expo, expo-doctor,
+     vitest + vite (node runner; jest and @react-native/jest-preset were dropped), eslint, eslint-config-expo, expo-doctor,
      @types/ungap__structured-clone, maestro (later)
 not installed yet: react-native-blob-util (phase 4), react-native-markdown-display
     (its peer set conflicts with expo-router's web deps — revisit per phase)
@@ -53,6 +53,22 @@ Limits found by running it, not assumed:
   verified on a real device; the web view verifies layout, contrast and round trips.
 - LAN Ollama works from the browser at http://localhost:11434/v1 (Ollama allows the
   localhost origin by default), streaming and reasoning included.
+- CORS blocks vendors, not LAN servers, on the web target. Measured with Node
+  against `https://opencode.ai/zen/go/v1/chat/completions`: the POST answers
+  `401 Upstream request failed: Invalid credential` with **no**
+  `Access-Control-Allow-Origin` header, and the preflight
+  `OPTIONS` (with `authorization` + `content-type` + `x-opencode-session`) answers
+  **404** with no CORS headers at all. So a browser never gets an answer to read:
+  `fetch` rejects with `TypeError: Failed to fetch` and the key is never sent.
+  The app used to report that as "network error · the request never reached the
+  server", which is true but useless. `src/core/network-error.ts` now compares the
+  endpoint origin with the page origin (scheme + host + **port**, so a LAN server
+  on another port is cross-origin too) and says
+  `blocked by the browser · https://opencode.ai sends no Access-Control-Allow-Origin to
+  http://localhost:8081 … the key never left the page`. Native builds have no CORS,
+  so the same message there stays a network error. `describeError(error, baseUrl)`
+  takes the endpoint; chat and Test connection both pass it, and an
+  `Error.cause` the message does not already carry is appended.
 - Dev-server memory: Metro crawls the project root to build its file map, so once
   `expo prebuild` creates android/ the server walked 849 MB across 1301 files of Gradle
   and CMake output on every start. Page requests hung and a long-lived server hit Node's
@@ -105,6 +121,17 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   (`headerShown: false`), so the bar pads itself against the status bar inset — nothing
   else reserves that space once the header is gone. `src/version.ts` is the display
   source; `scripts/bump-version.mjs` is the only writer.
+- **Debug builds say so**: `AppHeader` adds an amber `DEBUG` badge and a second line
+  naming the client and the dev server serving the bundle (`dev client ·
+  192.168.178.87:8081`, `web dev`, `Expo Go`, `debug APK`). The flag is
+  `__DEV__`, which Metro compiles to `false` in a release APK, so the badge is
+  never a cosmetic element — it is the proof a phone is running a dev client and
+  not the sideloaded build. `src/core/build-mode.ts` reads it through
+  `isDebugBuild()` (checked at render, so a test can flip the flag) and gets the
+  client/host from `expo-constants` (`executionEnvironment`, `expoConfig.hostUri`,
+  `expoGoConfig` to tell Expo Go from this app's dev client). Jest maps
+  `expo-constants` to `src/__mocks__/expo-constants.ts`, since the real module
+  reads values the native runtime holds.
 - **Device e2e**: taps are driven by `adb shell input`, and what is asserted is what the
   system drew: `uiautomator` bounds for the composer and Settings fields, the keyboard's
   top edge from `dumpsys window` (`mType=ime` → `mInsetsHint` bottom, keyboard top =
@@ -136,13 +163,51 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   second tap followed, and a `KEYCODE_BACK` sent while the keyboard is down navigates out of
   the app instead of hiding it.
 
+- **Two more harness bugs, found while chasing the image send**: `dumpUi()` reads the *active*
+  window, and while the keyboard is animating that window is the IME — its tree carries none of our
+  labels, so `keyboard-composer` and `keyboard-typing` failed with "nothing on screen labelled
+  Message" even though the composer was on screen. It now re-dumps until a node carries the app's
+  package (`package` is parsed from the XML). And `composer-card`/`vision-attach` compared the attach
+  button against the `Message` **EditText**, which is only one child of the card: the button sits to
+  the left of the field, so it was always reported "outside the composer". A plain RN `View` carries
+  no label, so uiautomator never reports the card itself — `composerRow()` derives the card's bounds
+  as the union of the labelled children (input, send/stop, attach) and asserts they share one
+  vertical band. `image-pick-preview` drives the picker to the end (tile tapped, accept pressed) and
+  asserts a removable thumbnail lands in the composer; the real round trip, which reads what the
+  endpoint said about the payload, is gated behind `E2E_PROBE_IMAGE=1` like the free-tier probe.
+
+- **What the photo picker actually looks like**: its tiles carry a caption (`Photo taken on …`) but are
+  **not** marked `clickable`, and its accept control is a plain `Done` label, also not clickable — so
+  requiring `clickable` made every image check stall inside the picker. `drivePhotoPicker()` matches on
+  the label and taps the node's centre. Reading that window needs `dumpWindow()`: `dumpUi()` re-dumps
+  until a node carries our package, which a picker never does, so it threw "dump never showed
+  com.flagg.mobileopenllmclient" while the picker was the active window.
+
+- **v1.6.0 (versionCode 7) failed 8/9, and the cause was the UI, not the harness**: the chat
+  screen gated a remote provider with no stored key by returning a centred "This provider needs
+  an API key" screen *instead of* chat, so `identity` (app name + version in the bar), every
+  keyboard check and every Settings check failed — nothing was labelled `Message`, and there was
+  no way to switch to a provider that can answer. `src/app/index.tsx` now keeps the header, the
+  model chip and the composer, disables **Send** and shows an amber hint with a link to Settings.
+  It reads the key with `hasApiKey(model.apiKeyRef)` rather than `keyIsStored`: the cache in
+  `src/core/keys.ts` is filled by `primeKeyCache` in `_layout.tsx` asynchronously, so the first
+  render after config loads reports a stored key as missing, and that race turned a keyed provider
+  into the same dead screen. Mounting chat then exposed a second bug: `createAgent` **threw** for a
+  remote provider without a key, and since the agent is built inside `useMemo` during render, that
+  throw was a `JavascriptException` on `mqt_v_native` — a FATAL crash, not a chat error (v1.7.0
+  passed 8/9 with `no-crash` failing). `createAgent` no longer throws; `ChatSession` blocks Send and
+  `testModelConnection` returns `"<model> needs an API key. Add it in Settings."` before probing.
+  The harness also tracked the redesign: `gotoSettings()` waits for `Providers` (the old screen said
+  `Models`), and `settings-field-reveal` scrolls to the `API key ref` field instead of opening an
+  `Edit <model>` row that no longer exists.
+
 - **v1.4.0 (versionCode 5) is built but not yet re-checked on the phone**: `assembleRelease` took 7m30s
   and produced a 34.5 MB arm64-only APK. Wireless adb had dropped (`adb devices` lists nothing), so
   `yarn device:e2e` and the OpenCode Go round trip still need a device. The gateway behaviour is proven
   from this host instead: both Go URLs answer `400 MissingSessionID` without `x-opencode-session` and
   `401 Invalid credential` with it and a dummy key, so routing works and only the key is missing.
 
-- **Fat tool results are verified in jest, not on the phone**: `src/__tests__/agent-wire.test.ts`
+- **Fat tool results are verified in vitest, not on the phone**: `src/__tests__/agent-wire.test.ts`
   runs the real `ToolLoopAgent` loop with the real guard and a scripted provider
   (`MockLanguageModelV4` from `ai/test`), so it reads the prompt the guard handed the model. A
   tool returning 4 × `MAX_TOOL_RESULT_CHARS` arrives on the next step as `type: 'text'` with the
@@ -153,8 +218,13 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   never reach the cap today. A tool that returns more (an HTTP body, a sqlite dump) would.
   Two AI SDK v7 shapes the mock needed: `finishReason` is an object (`{ unified: 'tool-calls' }`)
   and usage is nested (`inputTokens.total`, `outputTokens.text`); flat strings/numbers are dropped,
-  which silently ends the loop after one step. `jest.config.js` allows `@workflow/*` through
-  `transformIgnorePatterns` because `ai` pulls that ESM package in through `@ai-sdk/gateway`.
+  which silently ends the loop after one step. `vitest.config.mts` swaps native modules for stand-ins
+  (`react-native`, `expo/fetch`, `expo-constants`, `expo-image-picker`, `expo-device`,
+  `expo-file-system`, bundled images), and `ai`
+pulls `@workflow/*` in through `@ai-sdk/gateway` as ESM that node imports directly, so nothing
+needs jest's `transformIgnorePatterns`. `src/__tests__/setup.ts` sets `__DEV__` before every suite:
+`expo`'s async-require reads it at import time and node has no Metro to define it, so importing
+`core/tools.ts` → `expo-device` failed with `ReferenceError: __DEV__ is not defined`.
 
 ## Architecture
 ```
@@ -177,9 +247,9 @@ src/
 ```
 
 ## Phases and acceptance criteria
-1. **Env + scaffold** — repair package manager, `create-expo-app` on SDK 58, dev build scripts, strict TS, eslint, jest, CI running `typecheck + test + expo-doctor`.
+1. **Env + scaffold** — repair package manager, `create-expo-app` on SDK 58, dev build scripts, strict TS, eslint, vitest, CI running `typecheck + test + expo-doctor`.
    *Done when `expo run:android` and `expo run:ios` boot a blank screen on emulator and simulator.*
-   **Status: toolchain done** — Yarn 4.13 + node-modules linker, SDK 58 scaffold with Expo Router, strict TS, flat eslint config, jest on `@react-native/jest-preset`, CI workflow. `typecheck`, `lint`, `test` (3 passing), `expo-doctor` (20/20) and `expo export --platform ios` (1150 modules) all pass. Native boot not verified: no Android emulator run yet on this host, iOS needs macOS or an EAS build.
+   **Status: toolchain done** — Yarn 4.13 + node-modules linker, SDK 58 scaffold with Expo Router, strict TS, flat eslint config, vitest on node, CI workflow. `typecheck`, `lint`, `test` (3 passing), `expo-doctor` (20/20) and `expo export --platform ios` (1150 modules) all pass. Native boot not verified: no Android emulator run yet on this host, iOS needs macOS or an EAS build.
 2. **Streaming chat** — `useChat` + `DefaultChatTransport({ fetch: expoFetch })`, OpenAI-compatible provider pointed at a remote endpoint and a local server, polyfills wired in.
    *Done when tokens render incrementally on both platforms.*
     **Status: verified on device** — `useChat` + `DirectChatTransport({ agent })` (no HTTP route), `expo/fetch` behind `src/core/http.ts`, dialect providers, the context-window guard in `src/core/context.ts`, and the chat UI in `src/app/index.tsx`. Tokens render incrementally on the Android emulator and on a real phone (Android 16, arm64-v8a); aborting mid-turn leaves no orphan tool results. The oversized-turn case raises `ContextOverflowError` with the prompt budget instead of a server 400.
@@ -191,6 +261,7 @@ src/
     **Status: verified on device** — `ToolLoopAgent` with `isStepCount(MAX_STEPS)`, device tools (`get_device_info`, sandboxed `read_file` / `write_file` under `Paths.document`), tool cards per step in the transcript. `write_file` → `read_file` round trips complete on the emulator and on the phone, including a 16 KB file that the guard clips on the next turn. Approval sheet and trace inspector not built yet.
 5. **Persistence + resilience** — session list, reload after app kill, partial assistant messages saved on abort, JSON export/import.
    *Done when an interrupted stream is recoverable.*
+    **Status: transcript persistence landed** — every prompt and every reply is written to SQLite under the conversation's session id (`src/store/transcript.ts`, `transcript` table in `src/store/db.ts`; web keeps the same rows in localStorage), and the chat restores them via `useChat({ messages })` (`src/store/conversation.ts`, loaded in the root layout before the first render because `useChat` reads initial messages at mount). "New chat" mints a fresh session id (`startNewConversation`) and leaves the finished conversation on disk. A turn is stored only when it settles, so a mid-stream kill leaves no half-saved reply; the last 300 rows of a session are kept (`MAX_STORED_MESSAGES`). An errored turn is stored too — the prompt really went out — and `sanitizeForStorage` drops an assistant tool call that never got a result, because a restored `tool_calls` entry with no matching tool message is rejected by every dialect and would fail every later request. Pictures are capped by bytes, not rows: `MAX_STORED_IMAGE_BYTES` (8 MB per conversation) spends itself newest-first, replacing an older attached image with a line of text and stripping only the `media` entry out of an oversized tool result, because a tool result must keep its text half — a call without a result is the same rejected shape. Tool parts and usage metadata are stored, so the `↑ sent · ↓ received` footer survives a reload. Session list, JSON export and abort-resume checkpoints are not built yet.
 6. **Local/on-device tier** — `@react-native-ai/llama` + `llama.rn` GGUF download manager (HuggingFace, progress, storage budget), GPU-layer detection with CPU fallback, Apple Foundation Models and ADK Gemini Nano as zero-download built-ins, capability-gated offline mode.
 7. **Polish** — context compaction, MCP client, dark theme and accessibility, release builds (Android R8 is on by default in SDK 58; iOS 27 scene lifecycle), EAS dev builds + OTA updates, README and provider setup docs.
 
@@ -215,21 +286,21 @@ src/
   is not a real OpenCode Console/Go subscription key (the free-tier models are OpenCode-only and return
   `403` to other harnesses). `src/core/session.ts` mints one stable `ses_…` id, stores it in the kv table
   so restarts keep the conversation identity, and `requestHeaders` in `src/core/provider.ts` sends it plus
-  a client `User-Agent` (`open-llm-client/<version>`) for any host under `opencode.ai`. Two defaults ship
-  for the two URLs of the same gateway — `https://opencode.ai/inference/go/openai/v1` (documented) and
-  `https://opencode.ai/zen/go/v1` (older alias) — both with model `deepseek-v4.1-flash` (1M ctx, tools +
-  vision + reasoning, $0.15/$0.60 per 1M tokens per models.dev) sharing one credential slot, so pasting
-  the key in Settings is all the phone needs. The catalog's `opencode` entry is the pay-as-you-go Console
-  gateway (`inference/openai/v1`), not the Go one. `generate-provider-catalog.mjs` lists both under
-  `PAID_ONLY_MODELS`, so a preset added from the picker suggests a paid model instead of a free one that
-  would answer `403`.
-- **Both Go endpoints reach the gateway from the phone**: measured on a device with a dummy credential,
-  `https://opencode.ai/inference/go/openai/v1/chat/completions` and `https://opencode.ai/zen/go/v1/chat/completions`
-  both answer `HTTP 401 · Upstream request failed: Invalid credential`, so neither is unreachable and neither
-  needs the other as a fallback. The documented endpoint for `deepseek-v4.1-flash` is
-  `inference/go/openai/v1/chat/completions` with `@ai-sdk/openai-compatible` (OpenCode's Go endpoint table), so the
-  default profile keeps that URL and the zen alias stays as the alternative. A bare `Failed to fetch` means the
-  request never left the device, not a wrong endpoint.
+  a client `User-Agent` (`open-llm-client/<version>`) for any host under `opencode.ai`. One endpoint ships
+  for Go: `https://opencode.ai/zen/go/v1`, so the request is `POST https://opencode.ai/zen/go/v1/chat/completions`.
+  The `inference/go/openai/v1` path models.dev advertises is not a route Go serves and is not offered — the
+  generator pins the base through `API_OVERRIDE` and lists no `ENDPOINT_CHOICES`, so Settings shows no endpoint
+  switcher for Go. A profile stored on the retired path is rewritten to zen on load (`RETIRED_ENDPOINTS` in
+  `src/store/config.ts`), keeping its name, credential slot and model list, because a phone left on the wrong
+  URL fails every message with no clue why. The default model is `deepseek-v4.1-flash` (1M ctx, tools +
+  vision + reasoning) sharing one credential slot, so pasting the key in Settings is all the phone needs. The
+  catalog's `opencode` entry is the pay-as-you-go Console gateway (`inference/openai/v1`), not the Go one.
+  `generate-provider-catalog.mjs` lists both under `PAID_ONLY_MODELS`, so a preset added from the picker
+  suggests a paid model instead of a free one that would answer `403`.
+- **A bare `Failed to fetch` means the request never left the device**, not a wrong endpoint. Measured with a
+  dummy credential, `zen/go/v1/chat/completions` answers `HTTP 401 · Upstream request failed: Invalid credential`
+  and an unknown model id answers `HTTP 400 · Upstream request failed: Model is unavailable` — both are answers
+  from the gateway, so the transport, not the endpoint, is what to suspect when nothing comes back.
 - **Credential hygiene**: `normalizeApiKey` in `src/core/keys.ts` strips anything outside printable ASCII before
   a key is stored or probed, because a header value containing a control character makes the native client refuse
   the request and fetch reports that as a bare `Failed to fetch`. `describeError` names that class of failure
@@ -260,6 +331,8 @@ src/
   per run. `stdio: ['pipe', 'pipe', 'pipe']` captures it (the transport-recovery retry still reads
   `error.stderr`) and the output is nine lines. Run it as
   `node scripts/device-e2e.mjs --only=<check>` (equals form); options are not space-separated.
+- **Tool fetch and multi-part tool results**: `fetch_url` and `fetch_image` in `src/core/tools.ts` go through `core/http.ts`, so they use the same streaming `expo/fetch` as chat and are testable with `setFetchImplementation`. `fetch_image` answers with `{type:'content', value:[{type:'text'…},{type:'media',data,mediaType}]}`, which only reaches the model as a picture when the adapter is told: `createOpenAICompatible({ supportsMultiPartToolContent: true })` in `src/core/provider.ts`, set from `acceptsImages(model)` so a text-only LAN server is never sent array content on a `tool` message (many of them reject it). The guard counts that media part with `filePartBytes` (which now reads `part.data`) and `clipToolOutput` compresses only the text parts, so base64 is never rewritten into text the model cannot read. `fetch_image` is not offered to non-vision models at all: every tool schema rides on every request.
+- **A failure with no HTTP status is a streamed error, not a network fault**: Zen answers `200` and then emits an error chunk, which the SDK surfaces as `An error occurred.` with no status. The masking is `toUIMessageStream`'s default `onError` (`() => 'An error occurred.'`), so `DirectChatTransport` in `src/hooks/useAgentChat.ts` is given an `onError` that runs `describeError` — the real cause reaches the banner instead of the SDK's placeholder. `describeError` appends ` · accepted at <endpoint> and failed inside the response`, quotes the vendor body when present (` · server said: …`, collapsed to one line), and leaves a message that already names a status or a class (`HTTP 401 ·`, `network error ·`, `blocked by the browser ·`) untouched, because the banner re-describes the text the transport put in the error chunk. The transport line names the host (`network error · the request never reached http://host:port (…)`), which is what a tool fetch needs to say which URL failed.
 - **llama.rn** (phase 6) needs a development build plus an Expo config plugin, large RAM headroom, and per-device Metal/OpenCL support checks — gate it behind runtime capability probes.
 
 ## Open questions

@@ -1,21 +1,27 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_CAPABILITIES,
+  activeDescriptor,
   authStyleFor,
   deriveApiKeyRef,
+  descriptorFor,
   endpointPreview,
   profileIdFor,
   resolvedBaseUrl,
   sanitizeKeyRef,
   uniqueProfileId,
   type ModelDescriptor,
+  type ProviderConfig,
+  type ProviderModel,
 } from '../core/model';
 
 function descriptor(overrides: Partial<ModelDescriptor>): ModelDescriptor {
   return {
     id: 'openai:gpt-5-mini',
     label: 'Remote',
+    providerLabel: 'Remote',
+    modelLabel: 'GPT-5 Mini',
     dialect: 'openai-chat',
     modelId: 'gpt-5-mini',
     apiKeyRef: 'k',
@@ -104,5 +110,68 @@ describe('credential slots and profile ids', () => {
       'openai:model-3',
     );
     expect(uniqueProfileId([], 'openai:model')).toBe('openai:model');
+  });
+});
+
+describe('provider and model names', () => {
+  const model: ProviderModel = {
+    modelId: 'deepseek-v4.1-flash',
+    label: 'DeepSeek V4.1 Flash',
+    capabilities: DEFAULT_CAPABILITIES,
+  };
+
+  function provider(name: string): ProviderConfig {
+    return {
+      slug: 'opencode-go',
+      name,
+      dialect: 'openai-compatible',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiKeyRef: 'opencode-go-api-key',
+      source: 'remote',
+      hiddenModelIds: [],
+      extraModels: [],
+      selectedModelId: model.modelId,
+    };
+  }
+
+  it('keeps the model name out of the provider name', () => {
+    const descriptor = descriptorFor(provider('OpenCode Go (zen alias) · DeepSeek V4.1 Flash'), model);
+
+    expect(descriptor.providerLabel).toBe('OpenCode Go (zen alias)');
+    expect(descriptor.modelLabel).toBe('DeepSeek V4.1 Flash');
+    expect(descriptor.label).toBe('OpenCode Go (zen alias) · DeepSeek V4.1 Flash');
+  });
+
+  it('strips a trailing model id too, and keeps the endpoint alias', () => {
+    const descriptor = descriptorFor(provider('OpenCode Go · deepseek-v4.1-flash'), model);
+
+    expect(descriptor.providerLabel).toBe('OpenCode Go');
+  });
+
+  it('leaves a provider name that never mentioned the model alone', () => {
+    const descriptor = descriptorFor(provider('Ollama on LAN'), model);
+
+    expect(descriptor.providerLabel).toBe('Ollama on LAN');
+    expect(descriptor.label).toBe('Ollama on LAN · DeepSeek V4.1 Flash');
+  });
+
+  it('does not repeat a provider named after the model', () => {
+    const descriptor = descriptorFor(provider('DeepSeek V4.1 Flash'), model);
+
+    expect(descriptor.providerLabel).toBe('DeepSeek V4.1 Flash');
+    expect(descriptor.label).toBe('DeepSeek V4.1 Flash');
+  });
+
+  it('falls back to the slug when nothing usable is left', () => {
+    const descriptor = descriptorFor(provider(' · DeepSeek V4.1 Flash'), model);
+
+    expect(descriptor.providerLabel).toBe('opencode-go');
+  });
+
+  it('the active descriptor carries both names', () => {
+    const descriptor = activeDescriptor(provider('OpenCode Go (zen alias)'), [model]);
+
+    expect(descriptor.providerLabel).toBe('OpenCode Go (zen alias)');
+    expect(descriptor.modelLabel).toBe('DeepSeek V4.1 Flash');
   });
 });

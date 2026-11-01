@@ -1,5 +1,5 @@
 /**
- * Jest stand-in for `expo/fetch` (the real module needs a native runtime).
+ * Vitest stand-in for `expo/fetch` (the real module needs a native runtime).
  * Tests install their own implementation through `setFetchImplementation`.
  */
 export async function fetch(_input: unknown, _init?: unknown): Promise<Response> {

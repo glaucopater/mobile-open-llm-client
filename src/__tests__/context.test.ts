@@ -1,8 +1,10 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   ContextOverflowError,
   DEFAULT_CONTEXT_WINDOW,
+  FILE_BYTES_PER_TOKEN,
+  FILE_TOKEN_ESTIMATE,
   MAX_TOOL_RESULT_CHARS,
   MIN_OUTPUT_TOKENS,
   SAFETY_MARGIN_TOKENS,
@@ -10,6 +12,7 @@ import {
   elideText,
   estimatePromptTokens,
   estimateTokens,
+  filePartBytes,
   groupMessages,
   trimPromptToBudget,
   type TrimReport,
@@ -24,6 +27,8 @@ type Part = {
   output?: unknown;
   toolCallId?: string;
   toolName?: string;
+  mediaType?: string;
+  url?: string | Uint8Array;
 };
 
 type Message = { role: string; content: Part[] | string };
@@ -199,6 +204,87 @@ describe('trimPromptToBudget', () => {
       estimatePromptTokens([user('hi')]),
     );
   });
+
+  it('counts an attached image by its payload, not by the base64 text', () => {
+    const image = (bytes: number): Message => ({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this?' },
+        { type: 'file', mediaType: 'image/jpeg', url: `data:image/jpeg;base64,${'A'.repeat(Math.ceil((bytes * 4) / 3))}` },
+      ],
+    });
+
+    expect(filePartBytes({ type: 'file', url: 'data:image/jpeg;base64,AAAA' })).toBe(3);
+    expect(filePartBytes({ type: 'file', url: 'https://example.test/photo.jpg' })).toBe(0);
+    expect(filePartBytes({ type: 'file', url: new Uint8Array(10) })).toBe(10);
+
+    // A thumbnail is the flat guess plus a small size term; a multi-megabyte
+    // photo adds far more, because vision is billed by payload size.
+    expect(estimatePromptTokens([image(50_000)])).toBe(
+      FILE_TOKEN_ESTIMATE + Math.ceil(50_000 / FILE_BYTES_PER_TOKEN) + 4 + estimateTokens('what is in this?'),
+    );
+    expect(estimatePromptTokens([image(3_000_000)]) - estimatePromptTokens([image(50_000)])).toBeGreaterThanOrEqual(
+      Math.floor((3_000_000 - 50_000) / FILE_BYTES_PER_TOKEN),
+    );
+  });
+
+  it('counts a picture returned by a tool like a file part', () => {
+    // `fetch_image` answers with a media part. Counting its base64 as text would
+    // under-count the prompt and let the request exceed the window.
+    const base64 = 'A'.repeat(Math.ceil((400_000 * 4) / 3));
+    const toolResult: Message = {
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: 'call-1',
+          toolName: 'fetch_image',
+          output: {
+            type: 'content',
+            value: [
+              { type: 'text', text: 'Fetched https://example.test/photo.jpg' },
+              { type: 'media', data: base64, mediaType: 'image/jpeg' },
+            ],
+          },
+        },
+      ],
+    };
+
+    expect(filePartBytes({ type: 'media', data: base64 })).toBe(400_000);
+    expect(estimatePromptTokens([toolResult])).toBeGreaterThanOrEqual(
+      FILE_TOKEN_ESTIMATE + Math.ceil(400_000 / FILE_BYTES_PER_TOKEN),
+    );
+
+    // Clipping must compress the text and leave the picture intact.
+    const trimmed = trimPromptToBudget([toolResult], {
+      inputBudget: 100_000,
+      contextWindow: 100_000,
+      maxToolResultChars: 20,
+    });
+    const output = (trimmed.prompt[0].content as { output?: { value: unknown[] } }[])[0].output;
+
+    expect(output?.value?.[0]).toMatchObject({ type: 'text' });
+    expect(output?.value?.[1]).toMatchObject({ type: 'media', mediaType: 'image/jpeg' });
+    expect((output?.value?.[1] as { data: string }).data).toBe(base64);
+  });
+
+  it('drops older turns when an image makes the prompt too large', () => {
+    const prompt = [
+      user(bigText(30_000)),
+      user('short follow-up'),
+      {
+        role: 'user',
+        content: [{ type: 'file', mediaType: 'image/jpeg', url: `data:image/jpeg;base64,${'A'.repeat(4_000_000)}` }],
+      },
+    ];
+
+    const result = trimPromptToBudget(prompt, { inputBudget: 4096, contextWindow: 5000 });
+
+    expect(result.report.droppedMessages).toBeGreaterThan(0);
+    // The newest turn — the image — is the one that survives.
+    expect((result.prompt[result.prompt.length - 1].content as Part[])[0].type).toBe('file');
+    expect(estimatePromptTokens(result.prompt)).toBeLessThanOrEqual(4096);
+  });
 });
 
 describe('groupMessages', () => {
@@ -254,7 +340,7 @@ describe('contextWindowGuard', () => {
   });
 
   it('reports the trim so the UI can surface it', async () => {
-    const onTrim = jest.fn();
+    const onTrim = vi.fn();
     const guard = contextWindowGuard({ contextWindow: 2_048, onTrim });
 
     await guard.transformParams?.({

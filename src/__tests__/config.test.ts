@@ -1,14 +1,16 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DEFAULT_MODELS, resetConfig, useConfig } from '../store/config';
-import type { ModelDescriptor } from '../core/model';
+import { catalogProvider, modelsForProvider, providerInputFromCatalog } from '../core/catalog-search';
+import type { CatalogProvider } from '../core/provider-catalog';
+import { activeDescriptor, type ModelDescriptor, type ProviderConfig } from '../core/model';
+import { DEFAULT_PROVIDERS, LOCAL_SERVER_DEFAULT_BASE_URL, OPENCODE_GO_BASE_URL, resetConfig, useConfig } from '../store/config';
 
-// SQLite is native, so the store is stubbed with a plain map. `jest.mock` is
-// hoisted above the imports by the transform; mock variables must be
-// `mock`-prefixed and only read inside deferred call bodies.
+// SQLite is native, so the store is stubbed with a plain map. `vi.mock` is
+// hoisted above the imports; the map is built at import time and read only
+// inside the stub's own call bodies.
 const mockRows = new Map<string, unknown>();
 
-jest.mock('../store/db', () => ({
+vi.mock('../store/db', () => ({
   getJson: async (key: string) => (mockRows.has(key) ? mockRows.get(key) : null),
   setJson: async (key: string, value: unknown) => {
     mockRows.set(key, value);
@@ -18,296 +20,617 @@ jest.mock('../store/db', () => ({
   },
 }));
 
-function stored(): { models: unknown[]; selectedId: string; retiredDefaults?: string[] } {
-  return mockRows.get('model-registry') as {
-    models: unknown[];
-    selectedId: string;
-    retiredDefaults?: string[];
+function stored(): {
+  schema: number;
+  providers: ProviderConfig[];
+  selectedSlug: string;
+  retiredSlugs?: string[];
+} {
+  return mockRows.get('provider-config') as {
+    schema: number;
+    providers: ProviderConfig[];
+    selectedSlug: string;
+    retiredSlugs?: string[];
   };
+}
+
+function provider(slug: string): ProviderConfig | undefined {
+  return useConfig.getState().providers.find((row) => row.slug === slug);
 }
 
 beforeEach(() => {
   mockRows.clear();
-  useConfig.setState({ models: DEFAULT_MODELS, selectedId: DEFAULT_MODELS[0].id, loaded: true });
+  useConfig.setState({
+    providers: DEFAULT_PROVIDERS,
+    selectedSlug: DEFAULT_PROVIDERS[0].slug,
+    loaded: true,
+  });
 });
 
-describe('createProfile', () => {
-  it('adds a remote provider with a vendor endpoint and a key slot', () => {
-    const profile = useConfig.getState().createProfile({
+describe('addProvider', () => {
+  it('derives a slug and a credential slot for a hand-made provider', () => {
+    const added = useConfig.getState().addProvider({
       source: 'remote',
       dialect: 'openai-chat',
-      label: 'Gateway',
-      modelId: 'gpt-5.1',
+      name: 'My Gateway',
+      modelId: 'model',
     });
 
-    expect(profile.id).toBe('openai:gpt-5.1');
-    expect(profile.baseUrl).toBe('https://api.openai.com/v1');
-    expect(profile.apiKeyRef).toBe('openai-gpt-5.1-api-key');
-    expect(useConfig.getState().models).toContainEqual(profile);
+    expect(added.slug).toBe('my-gateway');
+    expect(added.apiKeyRef).toBe('my-gateway-api-key');
+    expect(added.baseUrl).toBe('https://api.openai.com/v1');
+    expect(added.selectedModelId).toBe('model');
+    expect(added.extraModels.map((model) => model.modelId)).toEqual(['model']);
   });
 
-  it('does not select an unconfigured profile for chat', () => {
-    const before = useConfig.getState().selectedId;
-
-    useConfig.getState().createProfile({
+  it('stores a typed model without selecting a provider that has no key', () => {
+    const before = useConfig.getState().selectedSlug;
+    const added = useConfig.getState().addProvider({
       source: 'remote',
       dialect: 'anthropic-messages',
-      label: 'Anthropic gateway',
-      modelId: 'claude-sonnet-4-5',
+      name: 'Another',
+      modelId: 'claude-x',
     });
 
-    expect(useConfig.getState().selectedId).toBe(before);
+    expect(useConfig.getState().selectedSlug).toBe(before);
+    // A model the catalog does not carry is kept as the user's own entry.
+    expect(added.extraModels.map((model) => model.modelId)).toEqual(['claude-x']);
+    expect(provider(added.slug)?.extraModels.map((model) => model.modelId)).toEqual(['claude-x']);
   });
 
-  it('honours a custom endpoint and trims trailing slashes', () => {
-    const profile = useConfig.getState().createProfile({
+  it('selects only when asked to', () => {
+    const added = useConfig.getState().addProvider({
       source: 'remote',
-      dialect: 'openai-compatible',
-      label: 'vLLM',
-      modelId: 'qwen3:4b',
-      baseUrl: 'http://192.168.1.20:8000/v1/',
+      dialect: 'openai-chat',
+      name: 'Now this one',
+      modelId: 'model',
+      select: true,
     });
 
-    expect(profile.baseUrl).toBe('http://192.168.1.20:8000/v1');
-    expect(profile.id).toBe('compatible:qwen3:4b');
+    expect(useConfig.getState().selectedSlug).toBe(added.slug);
   });
 
-  it('gives LAN servers no credential slot', () => {
-    const profile = useConfig.getState().createProfile({
+  it('gives a duplicated hand-made provider its own credential slot', () => {
+    const input = { source: 'remote', dialect: 'openai-chat', name: 'Dup', modelId: 'model' } as const;
+
+    const first = useConfig.getState().addProvider(input);
+    const second = useConfig.getState().addProvider(input);
+
+    expect(second.slug).toBe(`${first.slug}-2`);
+    // Hand-made providers own their slot, named after their slug, so two gateways
+    // never share a key by accident. Catalog providers keep the catalog's slot.
+    expect(second.apiKeyRef).toBe('dup-2-api-key');
+  });
+
+  it('uses the LAN endpoint for a local server', () => {
+    const added = useConfig.getState().addProvider({
       source: 'local-server',
       dialect: 'openai-compatible',
-      label: 'Ollama',
-      modelId: 'qwen3.5:9b',
+      name: 'LAN box',
+      modelId: 'model',
     });
 
-    expect(profile.apiKeyRef).toBeUndefined();
-    expect(profile.baseUrl).toBe('http://localhost:11434/v1');
+    expect(added.baseUrl).toBe(LOCAL_SERVER_DEFAULT_BASE_URL);
+    expect(added.apiKeyRef).toBeUndefined();
   });
 
-  it('keeps ids unique when the same model is added twice', () => {
-    const input = {
-      source: 'remote' as const,
-      dialect: 'openai-chat' as const,
-      label: 'Dup',
-      modelId: 'gpt-5.1',
-    };
-
-    const first = useConfig.getState().createProfile(input);
-    const second = useConfig.getState().createProfile(input);
-
-    expect(first.id).toBe('openai:gpt-5.1');
-    expect(second.id).toBe('openai:gpt-5.1-2');
-    expect(second.apiKeyRef).toBe('openai-gpt-5.1-2-api-key');
-  });
-
-  it('persists the registry to the store', () => {
-    useConfig.getState().createProfile({
+  it('persists to SQLite on every change', async () => {
+    useConfig.getState().addProvider({
       source: 'remote',
-      dialect: 'gemini-generate-content',
-      label: 'Gemini',
-      modelId: 'gemini-2.5-flash',
+      dialect: 'openai-chat',
+      name: 'Persisted',
+      modelId: 'model',
     });
+    await Promise.resolve();
 
-    expect(stored().models).toHaveLength(DEFAULT_MODELS.length + 1);
+    expect(stored().providers.some((row) => row.slug === 'persisted')).toBe(true);
+    expect(stored().schema).toBe(2);
   });
 });
 
-describe('updateModel', () => {
-  it('derives a key slot when a profile becomes remote', () => {
-    const profile = useConfig.getState().createProfile({
-      source: 'local-server',
-      dialect: 'openai-compatible',
-      label: 'Gateway that is actually remote',
-      modelId: 'mixtral',
-    });
-
-    useConfig.getState().updateModel(profile.id, { source: 'remote' });
-
-    const updated = useConfig.getState().models.find((model) => model.id === profile.id);
-
-    expect(updated?.apiKeyRef).toBe('local-mixtral-api-key');
-  });
-
-  it('drops the key slot when a profile becomes a LAN server', () => {
-    const profile = useConfig.getState().createProfile({
+describe('updateProvider', () => {
+  it('follows the new source only when the endpoint was never customised', () => {
+    const added = useConfig.getState().addProvider({
       source: 'remote',
       dialect: 'openai-chat',
-      label: 'Now local',
-      modelId: 'phi',
+      name: 'Flip',
+      modelId: 'model',
     });
 
-    useConfig.getState().updateModel(profile.id, { source: 'local-server' });
+    useConfig.getState().updateProvider(added.slug, { source: 'local-server' });
 
-    const updated = useConfig.getState().models.find((model) => model.id === profile.id);
+    expect(provider(added.slug)?.baseUrl).toBe(LOCAL_SERVER_DEFAULT_BASE_URL);
+    expect(provider(added.slug)?.apiKeyRef).toBeUndefined();
 
-    expect(updated?.apiKeyRef).toBeUndefined();
-    expect(updated?.baseUrl).toBe('http://localhost:11434/v1');
+    useConfig.getState().updateProvider(added.slug, { source: 'remote' });
+
+    expect(provider(added.slug)?.baseUrl).toBe('https://api.openai.com/v1');
+    expect(provider(added.slug)?.apiKeyRef).toBe('flip-api-key');
   });
 
-  it('keeps the id when the label and model id are edited', () => {
-    const [first] = DEFAULT_MODELS;
+  it('keeps an endpoint the user typed when the source flips', () => {
+    const added = useConfig.getState().addProvider({
+      source: 'remote',
+      dialect: 'openai-chat',
+      name: 'Kept',
+      modelId: 'model',
+      baseUrl: 'http://192.168.178.87:11434/v1',
+    });
 
-    useConfig.getState().updateModel(first.id, { label: 'Renamed', modelId: 'other' });
+    useConfig.getState().updateProvider(added.slug, { source: 'local-server' });
 
-    const updated = useConfig.getState().models.find((model) => model.id === first.id);
-
-    expect(updated?.id).toBe(first.id);
-    expect(updated?.label).toBe('Renamed');
+    expect(provider(added.slug)?.baseUrl).toBe('http://192.168.178.87:11434/v1');
   });
 
-  it('touches only the profile being edited', () => {
-    const [, second, third] = DEFAULT_MODELS;
+  it('normalizes the endpoint and never rewrites the slug', () => {
+    useConfig.getState().setEndpoint('ollama', 'http://192.168.178.87:11434/v1///');
 
-    useConfig.getState().updateModel(second.id, { dialect: 'openai-compatible', source: 'remote' });
+    expect(provider('ollama')?.baseUrl).toBe('http://192.168.178.87:11434/v1');
+  });
 
-    // A patch must not leak onto the other rows: it used to rewrite every
-    // profile's dialect and stamp them all with the edited id.
-    expect(useConfig.getState().models.find((model) => model.id === third.id)).toEqual(third);
-    expect(useConfig.getState().models.map((model) => model.id)).toEqual(
-      DEFAULT_MODELS.map((model) => model.id),
+  it('keeps one endpoint for Go and rewrites the retired one', () => {
+    // The `inference/go` path shipped in earlier builds is not a route Go serves;
+    // loading a profile left on it must land on the zen gateway, same key slot.
+    useConfig.getState().setEndpoint('opencode-go', 'https://opencode.ai/inference/go/openai/v1');
+
+    const go = provider('opencode-go');
+
+    expect(go?.baseUrl).toBe(OPENCODE_GO_BASE_URL);
+    expect(go?.apiKeyRef).toBe('opencode-go-api-key');
+    // Nothing offers a second endpoint, so the settings editor shows no switcher.
+    expect(go?.endpoints).toBeUndefined();
+  });
+
+  it('leaves the other providers untouched', () => {
+    const before = useConfig.getState().providers;
+    const [, second] = DEFAULT_PROVIDERS;
+
+    useConfig.getState().updateProvider(second.slug, { name: 'Renamed' });
+
+    const after = useConfig.getState().providers;
+
+    expect(after.map((row) => row.slug)).toEqual(before.map((row) => row.slug));
+    expect(after.find((row) => row.slug === second.slug)?.name).toBe('Renamed');
+    expect(after.find((row) => row.slug !== second.slug)).toEqual(
+      before.find((row) => row.slug !== second.slug),
     );
   });
+});
 
-  it('keeps the credential slot of untouched profiles', () => {
-    const [, second, third] = DEFAULT_MODELS;
+describe('model selection', () => {
+  it('switches the model and makes its provider the active one', () => {
+    useConfig.getState().addProvider(providerInputFromCatalog(catalogProvider('openrouter') as CatalogProvider));
+    const modelId = catalogProvider('openrouter')?.models[1]?.id ?? 'model';
 
-    useConfig.getState().updateModel(second.id, { source: 'local-server' });
+    useConfig.getState().selectModel('openrouter', modelId);
 
-    expect(useConfig.getState().models.find((model) => model.id === third.id)?.apiKeyRef).toBe(
-      third.apiKeyRef,
-    );
+    expect(useConfig.getState().selectedSlug).toBe('openrouter');
+    expect(provider('openrouter')?.selectedModelId).toBe(modelId);
+  });
+
+  it('ignores a provider that does not exist', () => {
+    const before = useConfig.getState().selectedSlug;
+
+    useConfig.getState().selectModel('nope', 'model');
+    expect(useConfig.getState().selectedSlug).toBe(before);
+
+    useConfig.getState().selectProvider('nope');
+    expect(useConfig.getState().selectedSlug).toBe(before);
+  });
+
+  it('selecting a provider keeps its model', () => {
+    useConfig.getState().selectProvider('anthropic');
+
+    expect(useConfig.getState().selectedSlug).toBe('anthropic');
+    expect(provider('anthropic')?.selectedModelId).toBeDefined();
+  });
+
+  it('repairs a selection that points at a hidden model', async () => {
+    mockRows.set('provider-config', {
+      schema: 2,
+      providers: [
+        {
+          slug: 'openrouter',
+          name: 'OpenRouter',
+          dialect: 'openai-compatible',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          source: 'remote',
+          apiKeyRef: 'openrouter-api-key',
+          extraModels: [],
+          hiddenModelIds: [DEFAULT_PROVIDERS[0]?.selectedModelId ?? 'model'],
+          selectedModelId: 'hidden-model-id',
+        },
+      ],
+      selectedSlug: 'openrouter',
+      retiredSlugs: [],
+    });
+
+    await useConfig.getState().load();
+
+    const openrouter = provider('openrouter');
+    const offered = openrouter?.extraModels.length ?? 0;
+
+    expect(offered).toBe(0);
+    expect(
+      (useConfig.getState().providers.find((row) => row.slug === 'openrouter')?.selectedModelId ?? '') !==
+        'hidden-model-id',
+    ).toBe(true);
+  });
+});
+
+describe('addModels and removeModel', () => {
+  it('adds listed server models and selects the first', () => {
+    const added = useConfig.getState().addProvider({
+      source: 'local-server',
+      dialect: 'openai-compatible',
+      name: 'Server',
+    });
+
+    // A blank provider holds no model until something is typed or listed.
+    expect(added.extraModels).toHaveLength(0);
+    expect(added.selectedModelId).toBe('');
+
+    useConfig.getState().addModels(added.slug, [
+      { modelId: 'qwen3.5:9b', label: 'qwen3.5:9b', capabilities: { tools: true, vision: false, reasoning: true } },
+      { modelId: 'llama-3.2', label: 'llama-3.2', capabilities: { tools: true, vision: false, reasoning: false } },
+    ]);
+
+    const row = provider(added.slug);
+
+    expect(row?.extraModels.map((model) => model.modelId)).toEqual(['qwen3.5:9b', 'llama-3.2']);
+    expect(row?.extraModels[0]?.added).toBe(true);
+    expect(row?.selectedModelId).toBe('qwen3.5:9b');
+  });
+
+  it('replaces an override of the same model id instead of duplicating it', () => {
+    const row = provider('ollama');
+    const modelId = row?.selectedModelId ?? 'model';
+
+    useConfig.getState().addModels('ollama', [
+      { modelId, label: 'edited', contextWindow: 4096, capabilities: { tools: false, vision: false, reasoning: false } },
+    ]);
+
+    expect(provider('ollama')?.extraModels).toHaveLength(1);
+    expect(provider('ollama')?.extraModels[0]?.contextWindow).toBe(4096);
+  });
+
+  it('deletes a typed model and hides a catalog one', () => {
+    useConfig.getState().addProvider(providerInputFromCatalog(catalogProvider('openrouter') as CatalogProvider));
+    const added = useConfig.getState().addProvider({
+      source: 'remote',
+      dialect: 'openai-compatible',
+      name: 'Mixed',
+      modelId: 'typed-model',
+    });
+
+    useConfig.getState().removeModel(added.slug, 'typed-model');
+
+    expect(provider(added.slug)?.extraModels).toHaveLength(0);
+    expect(provider(added.slug)?.hiddenModelIds).toEqual([]);
+
+    const catalogModel = catalogProvider('openrouter')?.models[0]?.id ?? 'model';
+    useConfig.getState().removeModel('openrouter', catalogModel);
+
+    expect(provider('openrouter')?.hiddenModelIds).toEqual([catalogModel]);
+  });
+
+  it('moves the selection off a model that was removed', () => {
+    const added = useConfig.getState().addProvider({
+      source: 'remote',
+      dialect: 'openai-compatible',
+      name: 'Only one',
+      modelId: 'typed-model',
+    });
+
+    useConfig.getState().removeModel(added.slug, 'typed-model');
+
+    expect(provider(added.slug)?.selectedModelId).toBe('model');
+  });
+
+  it('brings hidden catalog models back', () => {
+    useConfig.getState().addProvider(providerInputFromCatalog(catalogProvider('openrouter') as CatalogProvider));
+    const catalogModel = catalogProvider('openrouter')?.models[0]?.id ?? 'model';
+
+    useConfig.getState().removeModel('openrouter', catalogModel);
+    expect(provider('openrouter')?.hiddenModelIds).toEqual([catalogModel]);
+
+    useConfig.getState().restoreHiddenModels('openrouter');
+
+    expect(provider('openrouter')?.hiddenModelIds).toEqual([]);
+  });
+});
+
+describe('removeProvider', () => {
+  it('drops the provider and moves the selection', () => {
+    const [first, second] = DEFAULT_PROVIDERS;
+
+    useConfig.getState().selectProvider(first.slug);
+    useConfig.getState().removeProvider(first.slug);
+
+    expect(useConfig.getState().providers.some((row) => row.slug === first.slug)).toBe(false);
+    expect(useConfig.getState().selectedSlug).toBe(second.slug);
+  });
+
+  it('remembers a deleted built-in so a load does not re-add it', async () => {
+    useConfig.getState().removeProvider('opencode-go');
+    await Promise.resolve();
+
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().providers.some((row) => row.slug === 'opencode-go')).toBe(false);
+    expect(stored().retiredSlugs ?? []).toContain('opencode-go');
+  });
+
+  it('keeps a provider the user made deletable without retiring it', async () => {
+    const added = useConfig.getState().addProvider({
+      source: 'remote',
+      dialect: 'openai-chat',
+      name: 'Mine',
+      modelId: 'model',
+    });
+    useConfig.getState().removeProvider(added.slug);
+    await Promise.resolve();
+
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().providers.some((row) => row.slug === 'mine')).toBe(false);
+    expect(stored().retiredSlugs ?? []).not.toContain('mine');
   });
 });
 
 describe('load', () => {
-  it('repairs a registry whose ids collided', async () => {
-    const damaged: ModelDescriptor = {
-      id: 'openai:model-2',
-      label: 'Ollama on LAN',
-      dialect: 'openai-compatible',
-      modelId: 'qwen3.5:9b',
-      baseUrl: 'http://localhost:11434/v1',
-      source: 'local-server',
-      capabilities: { tools: true, vision: true, reasoning: true },
-      contextWindow: 32768,
+  it('starts on the defaults with nothing stored', async () => {
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().loaded).toBe(true);
+    expect(useConfig.getState().providers.map((row) => row.slug)).toEqual(
+      DEFAULT_PROVIDERS.map((row) => row.slug),
+    );
+  });
+
+  it('appends built-in providers a saved configuration predates', async () => {
+    mockRows.set('provider-config', {
+      schema: 2,
+      providers: [
+        {
+          slug: 'mine',
+          name: 'Mine',
+          dialect: 'openai-chat',
+          baseUrl: 'https://gateway.test/v1',
+          source: 'remote',
+          apiKeyRef: 'mine-api-key',
+          extraModels: [{ modelId: 'm', label: 'm', capabilities: { tools: true, vision: false, reasoning: false } }],
+          hiddenModelIds: [],
+          selectedModelId: 'm',
+        },
+      ],
+      selectedSlug: 'mine',
+      retiredSlugs: [],
+    });
+
+    await useConfig.getState().load();
+
+    const slugs = useConfig.getState().providers.map((row) => row.slug);
+
+    expect(slugs[0]).toBe('mine');
+    expect(slugs).toContain('opencode-go');
+    expect(useConfig.getState().selectedSlug).toBe('mine');
+  });
+
+  it('repairs a selection pointing at a provider that is gone', async () => {
+    mockRows.set('provider-config', {
+      schema: 2,
+      providers: [],
+      selectedSlug: 'gone',
+      retiredSlugs: [],
+    });
+
+    await useConfig.getState().load();
+
+    expect(useConfig.getState().selectedSlug).toBe(DEFAULT_PROVIDERS[0].slug);
+  });
+
+  it('migrates a per-model registry into one provider per slug', async () => {
+    const legacy: LegacyRegistryShape = {
+      models: [
+        {
+          id: 'ollama:qwen3.5:9b',
+          label: 'Ollama · qwen3.5:9b',
+          providerLabel: 'Ollama',
+          modelLabel: 'qwen3.5:9b',
+          dialect: 'openai-compatible',
+          modelId: 'qwen3.5:9b',
+          baseUrl: 'http://192.168.178.87:11434/v1',
+          source: 'local-server',
+          capabilities: { tools: true, vision: false, reasoning: true },
+          contextWindow: 32768,
+        },
+        {
+          id: 'ollama:llama-3.2',
+          label: 'Ollama · llama-3.2',
+          providerLabel: 'Ollama',
+          modelLabel: 'llama-3.2',
+          dialect: 'openai-compatible',
+          modelId: 'llama-3.2',
+          baseUrl: 'http://192.168.178.87:11434/v1',
+          source: 'local-server',
+          capabilities: { tools: true, vision: false, reasoning: false },
+          contextWindow: 8192,
+        },
+        {
+          id: 'opencode-go:deepseek-v4.1-flash',
+          label: 'OpenCode Go · DeepSeek V4.1 Flash',
+          providerLabel: 'OpenCode Go',
+          modelLabel: 'DeepSeek V4.1 Flash',
+          dialect: 'openai-compatible',
+          modelId: 'deepseek-v4.1-flash',
+          baseUrl: OPENCODE_GO_BASE_URL,
+          apiKeyRef: 'opencode-go-api-key',
+          headers: { 'x-opencode-session': 'ses_1' },
+          source: 'remote',
+          capabilities: { tools: true, vision: true, reasoning: true },
+          contextWindow: 1000000,
+        },
+      ],
+      selectedId: 'ollama:llama-3.2',
+      retiredDefaults: [],
     };
 
+    mockRows.set('model-registry', legacy);
+
+    await useConfig.getState().load();
+
+    const ollama = provider('ollama');
+
+    expect(ollama?.baseUrl).toBe('http://192.168.178.87:11434/v1');
+    expect(ollama?.source).toBe('local-server');
+    expect(ollama?.selectedModelId).toBe('llama-3.2');
+    // A legacy row named itself `Provider · model`; the provider keeps its own name.
+    expect(ollama?.name).toBe('Ollama');
+    // A model the catalog does not carry is kept as the user's own entry.
+    expect(ollama?.extraModels.map((model) => model.modelId)).toContain('llama-3.2');
+    // The second row of the same provider became one provider, not two.
+    expect(useConfig.getState().providers.filter((row) => row.slug === 'ollama')).toHaveLength(1);
+
+    const go = provider('opencode-go');
+
+    expect(go?.apiKeyRef).toBe('opencode-go-api-key');
+    expect(go?.headers).toEqual({ 'x-opencode-session': 'ses_1' });
+    // Go answers on one endpoint, so the migrated profile carries no switcher.
+    expect(go?.endpoints).toBeUndefined();
+    // A catalog model with the catalog's context window is not duplicated.
+    expect(go?.extraModels).toHaveLength(0);
+    expect(useConfig.getState().selectedSlug).toBe('ollama');
+    // The old shape is dropped so a reset does not re-migrate it.
+    expect(mockRows.has('model-registry')).toBe(false);
+  });
+
+  it('drops the model name from a provider stored in v2 shape', async () => {
+    // What the phone holds after an earlier migration: the model is still glued to
+    // the provider's name, so the chip and the switch sheet repeat it.
+    mockRows.set('provider-config', {
+      schema: 2,
+      selectedSlug: 'opencode-go-zen-alias',
+      retiredSlugs: [],
+      providers: [
+        {
+          slug: 'opencode-go-zen-alias',
+          name: 'OpenCode Go (zen alias) · DeepSeek V4.1 Flash',
+          dialect: 'openai-compatible',
+          baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+          source: 'remote',
+          apiKeyRef: 'opencode-go-api-key',
+          extraModels: [],
+          hiddenModelIds: [],
+          selectedModelId: 'deepseek-v4.1-flash',
+        },
+      ],
+    });
+
+    await useConfig.getState().load();
+
+    const stored = provider('opencode-go-zen-alias')!;
+    const label = activeDescriptor(stored, modelsForProvider(stored)).providerLabel;
+
+    expect(provider('opencode-go-zen-alias')?.name).toBe('OpenCode Go (zen alias)');
+    expect(label).toBe('OpenCode Go (zen alias)');
+    // The path it was stored on is not a route Go serves; loading moves it to the
+    // zen gateway instead of leaving a profile that fails every message.
+    expect(stored.baseUrl).toBe(OPENCODE_GO_BASE_URL);
+    expect(stored.endpoints).toBeUndefined();
+  });
+
+  it('reconnects a migrated gateway profile to its catalogue entry by endpoint', async () => {
+    // The phone's real profile: a name-derived slug the catalogue does not know,
+    // pointed at the zen gateway. Without the endpoint match none of the gateway's
+    // models merge, and every row reads `ctx unset · price unknown`.
     mockRows.set('model-registry', {
       models: [
-        damaged,
-        { ...damaged, label: 'OpenAI GPT-5 Mini', modelId: 'gpt-5-mini', source: 'remote' },
-        { ...damaged, label: 'Anthropic', modelId: 'claude-sonnet-4-5', source: 'remote' },
+        {
+          id: 'opencode-go-zen-alias:deepseek-v4.1-flash',
+          label: 'OpenCode Go (zen alias) · DeepSeek V4.1 Flash',
+          providerLabel: 'OpenCode Go (zen alias)',
+          modelLabel: 'DeepSeek V4.1 Flash',
+          dialect: 'openai-compatible',
+          modelId: 'deepseek-v4.1-flash',
+          baseUrl: OPENCODE_GO_BASE_URL,
+          apiKeyRef: 'opencode-go-api-key',
+          source: 'remote',
+          capabilities: { tools: true, vision: true, reasoning: true },
+          contextWindow: 1000000,
+        },
       ],
-      selectedId: 'openai:model-2',
+      selectedId: 'opencode-go-zen-alias:deepseek-v4.1-flash',
+      retiredDefaults: [],
     });
 
     await useConfig.getState().load();
 
-    const models = useConfig.getState().models;
+    const go = provider('opencode-go-zen-alias');
 
-    // Repaired ids describe the profile instead of carrying a numeric suffix.
-    expect(models.map((model) => model.id)).toEqual([
-      'openai:model-2',
-      'compatible:gpt-5-mini',
-      'compatible:claude-sonnet-4-5',
-      // The registry predates the built-ins, so they are appended after it.
-      ...DEFAULT_MODELS.map((model) => model.id),
-    ]);
-    expect(models.slice(0, 3).map((model) => model.label)).toEqual([
-      'Ollama on LAN',
-      'OpenAI GPT-5 Mini',
-      'Anthropic',
-    ]);
-    // The healed registry is written back, so the repair survives a restart.
-    expect(stored().models).toEqual(models);
+    expect(go?.catalogSlug).toBe('opencode-go');
+    // The user's own endpoint and key slot stay put.
+    expect(go?.baseUrl).toBe(OPENCODE_GO_BASE_URL);
+    expect(go?.apiKeyRef).toBe('opencode-go-api-key');
+    // The stored name still carried the model; the provider keeps its own part.
+    expect(go?.name).toBe('OpenCode Go (zen alias)');
+    expect(go?.extraModels).toHaveLength(0);
+    // The catalogue's list is what the picker shows, free models included.
+    const offered = modelsForProvider(go!);
+
+    expect(offered.length).toBe(catalogProvider('opencode-go')?.models.length);
+    expect(offered.some((model) => model.free === true)).toBe(true);
+    expect(activeDescriptor(go!, offered).label).toBe(
+      'OpenCode Go (zen alias) · DeepSeek V4.1 Flash',
+    );
   });
 
-  it('selects the first profile when the stored selection no longer exists', async () => {
-    mockRows.set('model-registry', { models: DEFAULT_MODELS, selectedId: 'gone:model' });
-
-    await useConfig.getState().load();
-
-    expect(useConfig.getState().selectedId).toBe(DEFAULT_MODELS[0].id);
-  });
-});
-
-describe('defaults added by a later build', () => {
-  const GO_ID = 'opencode-go:deepseek-v4.1-flash';
-
-  it('appends defaults a saved registry predates, leaving the user rows alone', async () => {
-    const mine: ModelDescriptor = {
-      id: 'compatible:qwen3.5:9b',
-      label: 'Ollama on LAN',
-      dialect: 'openai-compatible',
-      modelId: 'qwen3.5:9b',
-      baseUrl: 'http://192.168.178.87:11434/v1',
-      source: 'local-server',
-      capabilities: { tools: true, vision: true, reasoning: true },
-      contextWindow: 32768,
-    };
-
-    mockRows.set('model-registry', { models: [mine], selectedId: mine.id });
-
-    await useConfig.getState().load();
-
-    const models = useConfig.getState().models;
-
-    expect(models[0]).toEqual(mine);
-    expect(useConfig.getState().selectedId).toBe(mine.id);
-    expect(models.map((model) => model.id)).toEqual([
-      mine.id,
-      ...DEFAULT_MODELS.map((model) => model.id),
-    ]);
-    // Written back, so the new profile survives the next restart.
-    expect(stored().models).toEqual(models);
-  });
-
-  it('does not re-add a default the user deleted', async () => {
+  it('keeps a default the user deleted gone through migration', async () => {
     mockRows.set('model-registry', {
-      models: DEFAULT_MODELS.filter((model) => model.id !== GO_ID),
-      selectedId: DEFAULT_MODELS[0].id,
-      retiredDefaults: [GO_ID],
+      models: [
+        {
+          id: 'mine:model',
+          label: 'Mine · model',
+          providerLabel: 'Mine',
+          modelLabel: 'model',
+          dialect: 'openai-chat',
+          modelId: 'model',
+          baseUrl: 'https://gateway.test/v1',
+          source: 'remote',
+          apiKeyRef: 'mine-api-key',
+          capabilities: { tools: true, vision: false, reasoning: false },
+          contextWindow: 32768,
+        },
+      ],
+      selectedId: 'mine:model',
+      retiredDefaults: ['opencode-go:deepseek-v4.1-flash'],
     });
 
     await useConfig.getState().load();
 
-    expect(useConfig.getState().models.some((model) => model.id === GO_ID)).toBe(false);
-  });
-
-  it('retires a built-in that is deleted so a restart keeps it gone', async () => {
-    useConfig.getState().removeModel(GO_ID);
-
-    await useConfig.getState().load();
-
-    expect(useConfig.getState().models.some((model) => model.id === GO_ID)).toBe(false);
-    expect(stored().retiredDefaults).toEqual([GO_ID]);
-  });
-});
-
-describe('removeModel', () => {
-  it('falls back to another model when the selected one is deleted', () => {
-    const [first, second] = DEFAULT_MODELS;
-
-    useConfig.getState().select(first.id);
-    useConfig.getState().removeModel(first.id);
-
-    expect(useConfig.getState().selectedId).toBe(second.id);
-    expect(useConfig.getState().models.some((model) => model.id === first.id)).toBe(false);
+    expect(useConfig.getState().providers.some((row) => row.slug === 'opencode-go')).toBe(false);
+    expect(useConfig.getState().providers.some((row) => row.slug === 'mine')).toBe(true);
+    // The hand-made provider keeps its own name, not `Mine · model`.
+    expect(provider('mine')?.name).toBe('Mine');
   });
 });
 
 describe('resetConfig', () => {
-  it('clears persisted profiles back to the defaults', async () => {
-    useConfig.getState().createProfile({
-      source: 'remote',
-      dialect: 'openai-chat',
-      label: 'Temp',
-      modelId: 'x',
-    });
-
+  it('clears providers and selection but leaves the retired list empty', async () => {
+    useConfig.getState().removeProvider('opencode-go');
     await resetConfig();
 
-    expect(useConfig.getState().models).toEqual(DEFAULT_MODELS);
-    expect(mockRows.size).toBe(0);
+    expect(mockRows.has('provider-config')).toBe(false);
+    expect(useConfig.getState().providers.map((row) => row.slug)).toEqual(
+      DEFAULT_PROVIDERS.map((row) => row.slug),
+    );
+    expect(useConfig.getState().providers.some((row) => row.slug === 'opencode-go')).toBe(true);
   });
 });
+
+/** The shape builds before v1.6.0 wrote; used to drive the migration test. */
+type LegacyRegistryShape = {
+  models: ModelDescriptor[];
+  selectedId: string;
+  retiredDefaults?: string[];
+};

@@ -3,7 +3,7 @@
     "name": "Open LLM Client",
     "slug": "mobile-open-llm-client",
     "scheme": "mobile-open-llm-client",
-    "version": "1.5.0",
+    "version": "1.13.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -19,7 +19,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.flagg.mobileopenllmclient",
-      "versionCode": 6
+      "versionCode": 14
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -28,6 +28,13 @@
       "expo-router",
       "expo-secure-store",
       "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Photos you pick are sent to the model you selected.",
+          "microphonePermission": false
+        }
+      ],
       [
         "expo-build-properties",
         {

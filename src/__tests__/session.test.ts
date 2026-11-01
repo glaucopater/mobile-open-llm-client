@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   conversationSessionId,
@@ -7,11 +7,11 @@ import {
   needsSessionHeader,
 } from '../core/session';
 
-// SQLite is native, so the kv store the session id lives in is stubbed. `jest.mock`
-// is hoisted above the imports; mock variables must be `mock`-prefixed.
+// SQLite is native, so the kv store the session id lives in is stubbed. The map
+// is built at import time; the stub reads it only inside its own call bodies.
 const mockRows = new Map<string, unknown>();
 
-jest.mock('../store/db', () => ({
+vi.mock('../store/db', () => ({
   getJson: async (key: string) => (mockRows.has(key) ? mockRows.get(key) : null),
   setJson: async (key: string, value: unknown) => {
     mockRows.set(key, value);

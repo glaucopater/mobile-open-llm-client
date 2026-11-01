@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { tool } from 'ai';
 import { MockLanguageModelV4, convertArrayToReadableStream } from 'ai/test';
 import { z } from 'zod';
@@ -28,8 +28,11 @@ type PromptMessage = {
   content: Record<string, unknown>[] | string;
 };
 
-/** Every request the guard handed the model, in order. */
-const mockRequests: PromptMessage[][] = [];
+/**
+ * Every request the guard handed the model, in order. Built by `vi.hoisted`
+ * because the provider stub below is hoisted above the imports and reads it.
+ */
+const mockRequests = vi.hoisted(() => [] as PromptMessage[][]);
 
 /** LanguageModelV4 reports token counts as nested objects, not flat numbers. */
 function usage(inputTotal: number, outputTotal: number) {
@@ -99,13 +102,13 @@ const ANSWER_STEP: unknown[] = [
   { type: 'finish', finishReason: STOP_FINISH, usage: usage(40, 5) },
 ];
 
-jest.mock('../core/provider', () => ({
+vi.mock('../core/provider', () => ({
   // The scripted model is structurally typed; the cast keeps the test readable.
   createLanguageModel: () =>
     new MockLanguageModelV4({ doStream: mockDoStream as never, doGenerate: mockDoGenerate as never }),
 }));
 
-jest.mock('expo-secure-store', () => ({
+vi.mock('expo-secure-store', () => ({
   isAvailableAsync: async () => true,
   getItemAsync: async () => null,
   setItemAsync: async () => {},
@@ -116,6 +119,8 @@ function localDescriptor(overrides: Partial<ModelDescriptor> = {}): ModelDescrip
   return {
     id: 'local:qwen3.5:9b',
     label: 'Ollama on LAN',
+    providerLabel: 'Ollama on LAN',
+    modelLabel: 'Qwen3.5 9B',
     dialect: 'openai-compatible',
     modelId: 'qwen3.5:9b',
     baseUrl: 'http://192.168.178.87:11434/v1',

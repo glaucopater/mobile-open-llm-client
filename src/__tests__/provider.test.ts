@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_CAPABILITIES, type ModelDescriptor } from '../core/model';
 import { getFetchImplementation, setFetchImplementation } from '../core/http';
@@ -7,22 +7,22 @@ import { createLanguageModel } from '../core/provider';
 
 // The AI SDK ships ESM only, so the provider packages are stubbed here. These
 // tests assert our dialect wiring (which base URL, which model shape, which
-// fetch implementation), not the vendor internals. Mock variables must be
-// `mock`-prefixed for `jest.mock` factories to reference them.
+// fetch implementation), not the vendor internals. `vi.mock` is hoisted above the
+// imports, and the stubs only touch the spies inside their own call bodies.
 //
 // Session headers come from `core/session.ts`, which persists to SQLite — native,
 // so it is stubbed with a store that always has a stored id.
-jest.mock('../store/db', () => ({
+vi.mock('../store/db', () => ({
   getJson: async () => ({ id: 'ses_stored' }),
   setJson: async () => {},
   deleteKey: async () => {},
 }));
-const mockOpenAI = jest.fn();
-const mockAnthropic = jest.fn();
-const mockGoogle = jest.fn();
-const mockCompatible = jest.fn();
+const mockOpenAI = vi.fn();
+const mockAnthropic = vi.fn();
+const mockGoogle = vi.fn();
+const mockCompatible = vi.fn();
 
-jest.mock('@ai-sdk/openai', () => ({
+vi.mock('@ai-sdk/openai', () => ({
   createOpenAI: (settings: unknown) => {
     mockOpenAI(settings);
 
@@ -33,7 +33,7 @@ jest.mock('@ai-sdk/openai', () => ({
   },
 }));
 
-jest.mock('@ai-sdk/anthropic', () => ({
+vi.mock('@ai-sdk/anthropic', () => ({
   createAnthropic: (settings: unknown) => {
     mockAnthropic(settings);
 
@@ -43,7 +43,7 @@ jest.mock('@ai-sdk/anthropic', () => ({
   },
 }));
 
-jest.mock('@ai-sdk/google', () => ({
+vi.mock('@ai-sdk/google', () => ({
   createGoogleGenerativeAI: (settings: unknown) => {
     mockGoogle(settings);
 
@@ -53,7 +53,7 @@ jest.mock('@ai-sdk/google', () => ({
   },
 }));
 
-jest.mock('@ai-sdk/openai-compatible', () => ({
+vi.mock('@ai-sdk/openai-compatible', () => ({
   createOpenAICompatible: (settings: unknown) => {
     mockCompatible(settings);
 
@@ -67,6 +67,8 @@ function descriptor(overrides: Partial<ModelDescriptor>): ModelDescriptor {
   return {
     id: 'test:model',
     label: 'Test model',
+    providerLabel: 'Test provider',
+    modelLabel: 'Test model',
     dialect: 'openai-chat',
     modelId: 'test-model',
     source: 'remote',
@@ -157,7 +159,26 @@ describe('dialect adapters', () => {
       apiKey: undefined,
       headers: {},
       fetch: getFetchImplementation(),
+      // A text-only server is not given multi-part tool results: many OpenAI
+      // compatible servers reject array content on a `tool` message.
+      supportsMultiPartToolContent: false,
     });
+
+    // A vision server gets them, because `fetch_image` answers with a media part.
+    createLanguageModel(
+      descriptor({
+        id: 'ollama:qwen3-vl:4b',
+        dialect: 'openai-compatible',
+        modelId: 'qwen3-vl:4b',
+        baseUrl: 'http://10.0.2.2:11434/v1',
+        source: 'local-server',
+        capabilities: { vision: true, tools: true, reasoning: false },
+      }),
+    );
+
+    expect(mockCompatible).toHaveBeenLastCalledWith(
+      expect.objectContaining({ supportsMultiPartToolContent: true }),
+    );
   });
 
   it('passes profile headers through untouched', () => {
@@ -189,7 +210,7 @@ describe('dialect adapters', () => {
   });
 
   it('exposes the fetch implementation that can be swapped for tests', () => {
-    const replacement = jest.fn();
+    const replacement = vi.fn();
     const previous = getFetchImplementation();
 
     setFetchImplementation(replacement as unknown as typeof globalThis.fetch);

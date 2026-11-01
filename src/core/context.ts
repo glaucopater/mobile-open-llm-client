@@ -22,6 +22,10 @@ type PromptPart = {
   input?: unknown;
   output?: unknown;
   toolCallId?: string;
+  /** Attached image/audio as a data URL or a remote URL. */
+  url?: string | Uint8Array;
+  /** Base64 media inside a multi-part tool result. */
+  data?: string | Uint8Array;
 };
 
 type PromptMessage = {
@@ -58,6 +62,43 @@ export const MAX_TOOL_RESULT_CHARS = 16_000;
 
 /** Flat guess for one image/file part; real counts vary per provider. */
 export const FILE_TOKEN_ESTIMATE = 600;
+
+/**
+ * Extra tokens a large image adds on top of the flat guess. Vision is billed by
+ * payload size, so a 3 MB photo costs more than a thumbnail — and because this
+ * number only ever *adds*, the guard can drop an older group rather than send a
+ * prompt the server would reject.
+ */
+export const FILE_BYTES_PER_TOKEN = 1500;
+
+/** Bytes carried by a file part: a data URL is base64, a raw value is bytes. */
+export function filePartBytes(part: PromptPart): number {
+  const value = part.data ?? part.url;
+
+  if (value instanceof Uint8Array) {
+    return value.byteLength;
+  }
+
+  if (typeof value !== 'string') {
+    return 0;
+  }
+
+  // A data URL carries its payload after the comma; a bare base64 string (a
+  // multi-part tool result) is the payload itself. A remote URL is bytes we never
+  // see, so it is left to the flat per-file estimate rather than guessed from its
+  // length.
+  if (/^https?:\/\//i.test(value)) {
+    return 0;
+  }
+
+  const body = value.startsWith('data:') ? value.slice(value.indexOf(',') + 1) : value;
+
+  return Math.floor((body.length * 3) / 4);
+}
+
+function fileTokens(part: PromptPart): number {
+  return FILE_TOKEN_ESTIMATE + Math.ceil(filePartBytes(part) / FILE_BYTES_PER_TOKEN);
+}
 
 /** Marker kept in the prompt so truncation is never repeated or mistaken for user text. */
 const TRUNCATION_NOTE = '[Earlier turns were truncated to fit the model context window.]';
@@ -128,13 +169,27 @@ function partTokens(part: PromptPart): number {
       return estimateTokens(stringify(part.input)) + estimateTokens(part.toolCallId ?? '');
     case 'tool-result': {
       const output = part.output as { type?: string; value?: unknown; reason?: string } | undefined;
+
+      // A multi-part result can carry a picture (fetch_image). Its base64 costs
+      // like a file part, so treating it as text would under-count the prompt.
+      if (output?.type === 'content' && Array.isArray(output.value)) {
+        return (output.value as PromptPart[]).reduce(
+          (total, contentPart) =>
+            total +
+            (contentPart.type === 'media' || contentPart.type === 'file'
+              ? fileTokens({ ...contentPart, url: contentPart.data ?? contentPart.url })
+              : estimateTokens(contentPart.text ?? '')),
+          0,
+        );
+      }
+
       const body = output?.type === 'text' ? stringify(output.value) : stringify(output);
 
       return estimateTokens(body) + estimateTokens(part.toolCallId ?? '');
     }
     case 'file':
     case 'reasoning-file':
-      return FILE_TOKEN_ESTIMATE;
+      return fileTokens(part);
     default:
       // Reasoning, sources, custom parts: cheap, and the provider may drop them anyway.
       return estimateTokens(stringify(part));
@@ -255,6 +310,19 @@ function clipToolOutput(output: unknown, maxChars: number): unknown {
 
   if (result?.type === 'text' && typeof result.value === 'string') {
     return { ...result, value: elideText(result.value, maxChars) };
+  }
+
+  // A multi-part result is clipped text-only: turning the media part into a
+  // string would hand the model base64 it cannot read and lose the picture.
+  if (result?.type === 'content' && Array.isArray(result.value)) {
+    const parts = result.value as PromptPart[];
+    const clipped = parts.map((part) =>
+      part.type === 'text' && typeof part.text === 'string'
+        ? { ...part, text: elideText(part.text, maxChars) }
+        : part,
+    );
+
+    return { ...result, value: clipped };
   }
 
   const serialized = stringify(output);

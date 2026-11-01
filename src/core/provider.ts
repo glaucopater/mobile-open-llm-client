@@ -11,6 +11,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
 import { getFetchImplementation } from './http';
+import { acceptsImages } from './image';
 import { resolvedBaseUrl, type ModelDescriptor } from './model';
 import { CLIENT_USER_AGENT, conversationSessionId, needsSessionHeader, SESSION_HEADER } from './session';
 
@@ -86,6 +87,11 @@ export function createLanguageModel(model: ModelDescriptor, apiKey?: string) {
         apiKey,
         headers,
         fetch,
+        // `fetch_image` answers with a media part. Without this flag the adapter
+        // JSON-stringifies it, so the model would read base64 instead of a
+        // picture. Only vision models are given that shape, because a plain
+        // OpenAI-compatible server can reject array content on a tool message.
+        supportsMultiPartToolContent: acceptsImages(model),
       }).chatModel(model.modelId);
   }
 }

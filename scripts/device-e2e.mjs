@@ -51,6 +51,11 @@ function parseArgs(argv) {
 
 const options = parseArgs(process.argv.slice(2));
 
+/** Blocking sleep for synchronous adb reads: `Atomics.wait` parks the worker. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -140,6 +145,7 @@ function parseNode(tag) {
     text: attrs.text ?? '',
     desc: attrs['content-desc'] ?? '',
     class: attrs.class ?? '',
+    package: attrs.package ?? '',
     clickable: attrs.clickable === 'true',
     bounds: rect
       ? { left: Number(rect[1]), top: Number(rect[2]), right: Number(rect[3]), bottom: Number(rect[4]) }
@@ -147,10 +153,18 @@ function parseNode(tag) {
   };
 }
 
-function dumpUi() {
+/**
+ * Dumps the visible tree, dropping nodes whose bounds are inverted. A ScrollView
+ * that is still settling reports clipped children as `[x,286][x,56]` (top below
+ * bottom): picking one of those taps a coordinate that is not on screen, which is
+ * how a Settings check ended up tapping the model chip instead of the header link.
+ */
+function readWindow() {
   sh(`uiautomator dump ${UI_PATH}`);
   const xml = sh(`cat ${UI_PATH}`);
-  const nodes = [...xml.matchAll(/<node\b[^>]*>/g)].map((match) => parseNode(match[0]));
+  const nodes = [...xml.matchAll(/<node\b[^>]*>/g)]
+    .map((match) => parseNode(match[0]))
+    .filter((node) => node.bounds === null || node.bounds.bottom >= node.bounds.top);
 
   if (options.trace) {
     const labels = nodes
@@ -162,6 +176,33 @@ function dumpUi() {
   }
 
   return nodes;
+}
+
+function dumpUi() {
+  // `uiautomator dump` dumps the *active* window. While the keyboard is opening
+  // that window is the IME, whose tree has none of our labels — the
+  // `keyboard-composer` and `keyboard-typing` checks failed with "nothing on
+  // screen labelled Message" for exactly that reason. Retrying a few times reads
+  // the app's own window once the animation settles.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const nodes = readWindow();
+
+    if (nodes.some((node) => node.package === options.pkg)) {
+      return nodes;
+    }
+
+    sleepSync(250);
+  }
+
+  throw new Error(`dump never showed ${options.pkg} (the keyboard or a system window owns the screen)`);
+}
+
+/**
+ * The active window whatever it is. Used while the system photo picker owns the
+ * screen: `dumpUi()` insists on our own package, which a picker never has.
+ */
+function dumpWindow() {
+  return readWindow();
 }
 
 /** Keyboard state: the IME inset gives its top edge; `mInputViewStarted` says if it is up. */
@@ -289,6 +330,39 @@ function contains(nodes, text) {
   return nodes.find((n) => n.text.includes(text) || n.desc.includes(text));
 }
 
+/**
+ * The composer card as one band. uiautomator does not report the RN `View` that
+ * wraps it (a plain View carries no label), so the card's bounds are the union of
+ * its children. Comparing a button against the `Message` EditText alone compared
+ * it to the text field: the attach button sits to the left of the field, so it was
+ * always "outside the composer".
+ */
+function composerRow(nodes) {
+  const parts = nodes.filter(
+    (node) =>
+      node.bounds !== null &&
+      (node.desc === 'Message' ||
+        node.desc === 'Send message' ||
+        node.desc === 'Stop answering' ||
+        node.desc === 'Add images from the gallery' ||
+        /^At most \d+ images per message$/.test(node.desc)),
+  );
+
+  if (parts.length === 0) {
+    throw new Error('nothing on screen belonging to the composer');
+  }
+
+  return {
+    parts,
+    bounds: {
+      left: Math.min(...parts.map((n) => n.bounds.left)),
+      top: Math.min(...parts.map((n) => n.bounds.top)),
+      right: Math.max(...parts.map((n) => n.bounds.right)),
+      bottom: Math.max(...parts.map((n) => n.bounds.bottom)),
+    },
+  };
+}
+
 async function screenshot(name) {
   sh(`screencap -p ${SHOT_PATH}`);
   const file = join(options.shots, `${name}.png`);
@@ -336,11 +410,11 @@ async function check(name, body) {
  * has not settled yet makes a check pass or fail for the wrong reason — the
  * first run read the Chat screen while believing it was on Settings.
  */
-async function waitFor(predicate, description, timeout = 5000) {
+async function waitFor(predicate, description, timeout = 5000, read = dumpUi) {
   const deadline = Date.now() + timeout;
 
   for (;;) {
-    const hit = predicate(dumpUi());
+    const hit = predicate(read());
 
     if (hit) {
       return hit;
@@ -352,6 +426,39 @@ async function waitFor(predicate, description, timeout = 5000) {
 
     await sleep(250);
   }
+}
+
+/**
+ * Drives the system photo picker to the end: tap a tile, press its accept
+ * control, hand the screen back to the app. Two things the picker taught us by
+ * being dumped rather than guessed — its tiles are *not* marked clickable (a tap
+ * still selects them), and its accept control is a plain `Done` label, also not
+ * clickable. Requiring `clickable` on either made every image check stall in the
+ * picker, so the label alone decides and the tap goes to the node's centre.
+ */
+async function drivePhotoPicker() {
+  const tile = await waitFor(
+    (nodes) =>
+      nodes.find((n) => /Photo taken on|Screenshot/i.test(n.desc)) ??
+      nodes.find((n) => n.class.toLowerCase().includes('imageview') && n.bounds !== null),
+    'a photo tile in the picker',
+    8000,
+    dumpWindow,
+  );
+  await tap(tile);
+
+  const accept = await waitFor(
+    (nodes) =>
+      nodes.find((n) => /^(Next|OK|Done|Finish|Use|Send)$/i.test((n.text || n.desc).trim())),
+    'the picker accept control',
+    6000,
+    dumpWindow,
+  );
+  await tap(accept);
+
+  await waitFor(() => (focus().includes(options.pkg) ? true : null), 'the app after the picker', 12000);
+
+  return tile.desc || tile.text;
 }
 
 /** Waits for the keyboard to come up; taps are async on the device. */
@@ -392,17 +499,70 @@ async function tapComposerUntilKeyboardUp() {
   return keyboard;
 }
 
+/**
+ * Dismisses anything stacked above the screens: the modal model switcher, and
+ * the system dialogs (a notification shade steals focus and swallows taps).
+ * Android's back key closes both, and the modal answers `onRequestClose`.
+ */
+async function clearStack() {
+  sh('am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS');
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!contains(dumpUi(), 'Switch model')) {
+      return;
+    }
+
+    sh('input keyevent KEYCODE_BACK');
+    await sleep(options.wait);
+  }
+}
+
+/**
+ * Waits for another activity to take the screen. The image picker is a separate
+ * app, so its arrival is the proof a button did something rather than a tap that
+ * was swallowed. A notification shade or recents is not a picker, so those are
+ * pushed away and the wait continues instead of counting as a hit.
+ */
+async function waitForOtherActivity(timeout = 8000) {
+  const deadline = Date.now() + timeout;
+
+  for (;;) {
+    const current = focus();
+
+    if (!current.includes(options.pkg)) {
+      if (current.includes('NotificationShade') || current.includes('Recents')) {
+        closeSystemDialogs();
+        sh(`am start -n ${LAUNCH}`);
+      } else {
+        return current;
+      }
+    }
+
+    if (Date.now() > deadline) {
+      throw new Error(`the picker never took the screen: ${focus()}`);
+    }
+
+    await sleep(400);
+  }
+}
+
 /** Navigates to Settings if not already there, so `--only=` runs stand alone. */
 async function gotoSettings() {
-  if (!contains(dumpUi(), 'Models')) {
+  // The header names the screen. The `Providers (N)` heading sits inside the scroll
+  // view and is dropped from a dump taken mid-scroll, so the header is the proof.
+  await clearStack();
+
+  if (!contains(dumpUi(), `v${identity.version} · Settings`)) {
     await tap(pick(dumpUi(), 'Settings'));
   }
 
-  await waitFor((nodes) => contains(nodes, 'Models'), 'the Settings screen');
+  await waitFor((nodes) => contains(nodes, `v${identity.version} · Settings`), 'the Settings screen');
 }
 
 /** Back to Chat, likewise. */
 async function gotoChat() {
+  await clearStack();
+
   if (!contains(dumpUi(), `v${identity.version} · Chat`)) {
     await tap(pick(dumpUi(), 'Chat'));
   }
@@ -410,12 +570,72 @@ async function gotoChat() {
   await waitFor((nodes) => contains(nodes, `v${identity.version} · Chat`), 'the Chat screen');
 }
 
+/** Finds a node whose visible text or label matches, for lines whose length varies. */
+function findText(nodes, pattern) {
+  return nodes.find((n) => pattern.test(n.text) || pattern.test(n.desc));
+}
+
+/**
+ * Replaces the contents of a focused text field: select-all then delete. `input
+ * text` appends, so a field left holding text from an earlier check would end up
+ * holding two strings and the taps that follow would search for the wrong thing.
+ */
+async function replaceText(node, text) {
+  await tap(node);
+  await awaitKeyboard(true);
+  sh('input keyevent 122');
+  sh('input keyevent 67');
+  await sleep(options.wait);
+  sh(`input text "${text.replace(/ /g, '%s')}"`);
+  await sleep(options.wait);
+}
+
+/** Taps the first node whose text or label contains `text`, for names with suffixes. */
+async function tapContaining(nodes, text) {
+  const node = contains(nodes, text);
+
+  if (!node) {
+    throw new Error(`nothing on screen containing "${text}"`);
+  }
+
+  await tap(node);
+}
+
+/**
+ * Drives the chat's switcher: opens it, selects `providerName`, narrows the model
+ * list with `query`, taps the row whose label matches, closes. The provider chip
+ * is also a `Use … for chat` row, so `rowPattern` has to name the model.
+ */
+async function selectModel(providerName, query, rowPattern) {
+  await tap(pick(dumpUi(), 'Switch provider or model'));
+  await waitFor((nodes) => contains(nodes, 'Switch model'), 'the model switcher');
+
+  // Provider chips are matched by substring: a migrated profile keeps its endpoint
+  // suffix, so it reads "OpenCode Go (zen alias)" rather than the preset name.
+  await tapContaining(dumpUi(), providerName);
+  await replaceText(pick(dumpUi(), 'Search models'), query);
+
+  const row = await waitFor(
+    (nodes) => nodes.find((n) => n.clickable && rowPattern.test(n.desc)),
+    `the model row matching ${rowPattern.source}`,
+  );
+  await tap(row);
+  await tap(pick(dumpUi(), 'Close model switcher'));
+  // If the Close tap lands on a screen that has not settled, back still dismisses
+  // the modal, so the check does not stay stuck inside the switcher.
+  await clearStack();
+
+  await waitFor((nodes) => contains(nodes, providerName), 'the chat chip');
+}
+
 /** Scrolls a list down by one screen; adb swipes, the app does the rest. */
 async function scrollDown() {
   const x = Math.round(display.width / 2);
 
   sh(`input swipe ${x} 1700 ${x} 500 400`);
-  await sleep(options.wait);
+  // The list keeps animating after the swipe, and a dump taken during it reports
+  // clipped children with inverted bounds, so give it a moment to settle.
+  await sleep(Math.max(options.wait, 900));
 }
 
 /**
@@ -483,6 +703,25 @@ async function main() {
     }
 
     return `top bar shows ${identity.name} · v${identity.version} + icon at y ${name.bounds?.top}`;
+  });
+
+  await check('version-code', async () => {
+    // The APK's own version strings, read from the package manager: they prove the
+    // build that was installed is the one the repo describes, not an older one.
+    const dump = sh(`dumpsys package ${options.pkg}`);
+    const versionName = /versionName=(\S+)/.exec(dump)?.[1] ?? '';
+    const versionCode = /versionCode=(\d+)/.exec(dump)?.[1] ?? '';
+    const app = JSON.parse(readFileSync('app.json', 'utf8')).expo;
+
+    if (versionName !== app.version) {
+      throw new Error(`installed versionName "${versionName}", app.json says "${app.version}"`);
+    }
+
+    if (versionCode !== String(app.android?.versionCode ?? '')) {
+      throw new Error(`installed versionCode ${versionCode}, app.json says ${app.android?.versionCode}`);
+    }
+
+    return `versionCode ${versionCode}, versionName ${versionName}`;
   });
 
   await check('keyboard-composer', async () => {
@@ -555,19 +794,25 @@ async function main() {
   });
 
   await check('composer-card', async () => {
-    const composer = pick(dumpUi(), 'Message');
+    const row = composerRow(dumpUi());
 
-    if (!composer.bounds) {
-      throw new Error('composer has no bounds');
-    }
-
-    if (composer.bounds.left <= 0 || composer.bounds.right >= display.width) {
+    if (row.bounds.left <= 0 || row.bounds.right >= display.width) {
       throw new Error(
-        `composer spans the screen edge (${composer.bounds.left}..${composer.bounds.right} of ${display.width}), not a floating card`,
+        `composer spans the screen edge (${row.bounds.left}..${row.bounds.right} of ${display.width}), not a floating card`,
       );
     }
 
-    return `composer inset ${composer.bounds.left}px from the left, ${display.width - composer.bounds.right}px from the right`;
+    // A card, not a toolbar: the children share one vertical band.
+    const band = row.bounds.bottom - row.bounds.top;
+    const tallest = Math.max(...row.parts.map((n) => n.bounds.bottom - n.bounds.top));
+
+    if (band > tallest * 1.6) {
+      throw new Error(
+        `composer children span ${band}px vertically (tallest ${tallest}px) — they are not one card`,
+      );
+    }
+
+    return `${row.parts.length} controls inset ${row.bounds.left}px from the left, ${display.width - row.bounds.right}px from the right, band ${row.bounds.top}..${row.bounds.bottom}`;
   });
 
   await check('settings-header', async () => {
@@ -586,19 +831,15 @@ async function main() {
   await check('settings-field-reveal', async () => {
     await gotoSettings();
 
-    const edit = await waitFor(
-      (nodes) => nodes.find((n) => n.desc.startsWith('Edit ')),
-      'a model row to edit',
-    );
-
-    await tap(edit);
-
-    // The editor sits below the model list, so its lower fields start off-screen;
-    // scrolling them into view is what the reveal-on-focus path has to handle.
+    // Provider cards hold their fields inline. The credential fields live in a
+    // remote card below the fold, so scrolling them into view is what the
+    // reveal-on-focus path has to handle — the old per-model editor had an
+    // "Edit <model>" row to open, which no longer exists.
     const field = await findByScroll(
       (nodes) => nodes.find((n) => n.desc === 'API key ref'),
       'the API key ref field',
     );
+
     await tap(field);
 
     const keyboard = await awaitKeyboard(true);
@@ -632,6 +873,216 @@ async function main() {
 
     return `composer reachable again at y ${composer.bounds.top}`;
   });
+
+  await check('free-model-badge', async () => {
+    // Free models are listed rather than hidden, so the badge and the price line
+    // are what tells them apart from a paid model that also needs a key.
+    await gotoChat();
+    await tap(pick(dumpUi(), 'Switch provider or model'));
+    await waitFor((nodes) => contains(nodes, 'Switch model'), 'the model switcher');
+    await tapContaining(dumpUi(), 'OpenCode Go');
+    await replaceText(pick(dumpUi(), 'Search models'), 'free');
+
+    const row = await waitFor(
+      (nodes) => nodes.find((n) => n.clickable && /for chat, free model/.test(n.desc)),
+      'a row labelled as a free model',
+    );
+    const badge = await waitFor((nodes) => nodes.find((n) => n.text === 'free'), 'the free badge');
+    const price = findText(dumpUi(), /free \/ free per 1k/);
+
+    await tap(pick(dumpUi(), 'Close model switcher'));
+
+    if (!price) {
+      throw new Error('the free row does not say what it costs');
+    }
+
+    return `${row.desc} · badge "${badge.text}" at y ${badge.bounds?.top} · ${price.text}`;
+  });
+
+  await check('vision-attach', async () => {
+    // Image input has to be a real, tappable control on a vision model. The two
+    // emoji buttons it replaced drew Android's own glyph colour, so a disabled
+    // one looked enabled and a working one looked broken; there is now one
+    // button with text, drawn only when the model declares vision.
+    await gotoChat();
+    await selectModel('OpenCode Go', 'mimo', /mimo/i);
+
+    const chip = await waitFor((nodes) => findText(nodes, /mimo/i), 'the chip naming the model');
+    const button = await waitFor(
+      (nodes) => nodes.find((n) => n.desc === 'Add images from the gallery'),
+      'the image button',
+    );
+    const row = composerRow(dumpUi());
+
+    if (!button.clickable) {
+      throw new Error(`the image button is not clickable: ${JSON.stringify(button)}`);
+    }
+
+    if (
+      button.bounds.left < row.bounds.left ||
+      button.bounds.right > row.bounds.right ||
+      button.bounds.bottom > row.bounds.bottom
+    ) {
+      throw new Error(
+        `image button [${button.bounds.left},${button.bounds.top},${button.bounds.right},${button.bounds.bottom}] sits outside the composer [${row.bounds.left},${row.bounds.top},${row.bounds.right},${row.bounds.bottom}]`,
+      );
+    }
+
+    // Tapping it must hand the screen to the system picker, not do nothing.
+    await tap(button);
+    const picker = await waitForOtherActivity();
+
+    sh('input keyevent KEYCODE_BACK');
+    await waitFor(() => (focus().includes(options.pkg) ? true : null), 'the app after the picker');
+
+    return `chip "${chip.text || chip.desc}" · "${button.desc}" at y ${button.bounds.top} inside the composer · picker ${picker}`;
+  });
+
+  await check('image-pick-preview', async () => {
+    // The pick has to come back as a thumbnail the message will carry, not just
+    // open a picker. The tile is tapped, `Done` pressed, and the app must then
+    // show a removable attachment.
+    await gotoChat();
+
+    const button = await waitFor(
+      (nodes) => nodes.find((n) => n.desc === 'Add images from the gallery'),
+      'the image button',
+    );
+    await tap(button);
+    await waitForOtherActivity();
+
+    const picked = await drivePhotoPicker();
+    const thumbnail = await waitFor(
+      (nodes) => nodes.find((n) => /^Remove /.test(n.desc)),
+      'the attachment thumbnail',
+      10000,
+    );
+    const label = findText(dumpUi(), /image\/(jpeg|png)/);
+
+    // Removing it must leave the composer with nothing pending.
+    await tap(thumbnail);
+    await waitFor(
+      (nodes) => (findText(nodes, /^Remove /) === undefined ? true : null),
+      'the attachment gone from the composer',
+    );
+
+    return `${thumbnail.desc} from "${picked}"${label ? ` · payload labelled "${label.text || label.desc}"` : ''}`;
+  });
+
+  // Only runs on request: it picks a real photo and spends a round trip.
+  if (process.env.E2E_PROBE_IMAGE === '1') {
+    await check('image-roundtrip', async () => {
+      // Picking a photo is not proof it reached the model. The check drives the
+      // whole path: pick, thumbnail, send, then read what the endpoint said.
+      await gotoChat();
+      await selectModel('OpenCode Go', 'mimo', /mimo/i);
+
+      const button = await waitFor(
+        (nodes) => nodes.find((n) => n.desc === 'Add images from the gallery'),
+        'the image button',
+      );
+      await tap(button);
+      await waitForOtherActivity();
+
+      const picked = await drivePhotoPicker();
+      const attachment = await waitFor(
+        (nodes) => nodes.find((n) => /^Remove /.test(n.desc)),
+        'the attachment thumbnail',
+        10000,
+      );
+
+      sh('logcat -c');
+      await tapComposerUntilKeyboardUp();
+      await replaceText(pick(dumpUi(), 'Message'), 'What is in this image? Answer in one word.');
+      // The composer moves when the keyboard opens, so the send button is re-read.
+      await tap(pick(dumpUi(), 'Send message'));
+
+      // The picture has to appear in the sent bubble: that is the converted
+      // payload the request carried, not just a thumbnail in the composer. The
+      // bubble draws the image, so either the accessibility label or an image
+      // view inside the app's window counts as proof.
+      const sent = await waitFor(
+        (nodes) =>
+          findText(nodes, /^Image \(image\//) ??
+          nodes.find((n) => n.package === options.pkg && n.class.toLowerCase().includes('imageview')),
+        'the image inside the sent message',
+        20000,
+      );
+
+      // Either an answer with token counts, or a failure that names its cause. A
+      // bare "An error occurred." is the bug this probe exists to catch.
+      const outcome = await waitFor(
+        (nodes) =>
+          findText(nodes, /↑ \d+ sent · ↓ \d+ received/) ??
+          findText(
+            nodes,
+            /HTTP \d{3}|server said|failed inside the response|blocked by the browser|network error|exceeds the context/i,
+          ),
+        'an answer or a named failure',
+        90_000,
+      );
+
+      const line = outcome.text || outcome.desc;
+      const proof = sent.desc || sent.text || sent.class;
+
+      if (/^↑ \d+ sent/.test(line)) {
+        return `image round trip ok · "${attachment.desc}" from "${picked}" drawn as "${proof}" · ${line}`;
+      }
+
+      const log = sh('logcat -d -t 200')
+        .split('\n')
+        .filter((entry) => /mobileopenllmclient|ImagePicker|HTTP|ai-sdk|Exception/i.test(entry))
+        .slice(-6)
+        .join(' / ');
+
+      return `image rejected · "${attachment.desc}" from "${picked}" drawn as "${proof}" · screen says "${line}"${log ? ` · logcat: ${log}` : ''}`;
+    });
+  }
+
+  // Only runs on request: it spends a real round trip and needs the saved Go key.
+  if (process.env.E2E_PROBE_FREE === '1') {
+    await check('free-tier-probe', async () => {
+      await gotoChat();
+
+      try {
+        await selectModel('OpenCode Go', 'beam-free', /Beam Free/);
+
+        const chip = await waitFor(
+          (nodes) => findText(nodes, /free model · a gateway may still restrict/),
+          'the chip naming the free tier',
+        );
+
+        if (findText(dumpUi(), /needs an API key/)) {
+          throw new Error('OpenCode Go has no saved key — press Save key in Settings, then re-run');
+        }
+
+        await tapComposerUntilKeyboardUp();
+        await replaceText(pick(dumpUi(), 'Message'), 'Reply with exactly OK.');
+        await tap(pick(dumpUi(), 'Send message'));
+
+        // Whatever the gateway decides, the screen has to name it: a status, or an
+        // answer. A bare "network error" here would be the bug this probe exists to catch.
+        const outcome = await waitFor(
+          (nodes) => findText(nodes, /^OK$/) ?? findText(nodes, /HTTP \d{3}/),
+          'an answer or a real HTTP status',
+          60_000,
+        );
+        const line = outcome.text || outcome.desc;
+        const usage = findText(dumpUi(), /↑ \d+ sent · ↓ \d+ received/);
+        const detail = usage !== undefined ? `${line} (${usage.text})` : line;
+
+        if (/^HTTP /.test(line)) {
+          return `chip "${chip.text}" · free tier answered ${detail}`;
+        }
+
+        return `chip "${chip.text}" · free tier replied "${detail}"`;
+      } finally {
+        // Leave the provider on a paid model: a phone left on a restricted tier
+        // would 403 on the next message the user types.
+        await selectModel('OpenCode Go', 'deepseek', /DeepSeek/);
+      }
+    });
+  }
 
   await check('no-crash', async () => {
     const crashes = sh('logcat -d -b crash -t 40');
