@@ -29,5 +29,7 @@ jobs:
 
       - run: yarn typecheck
       - run: yarn lint
-      - run: yarn test --ci
+      # Vitest 5 has no `--ci` flag; `vitest run` (the `test` script) is already a
+      # one-shot run that exits non-zero on failure, so nothing else is needed.
+      - run: yarn test
       - run: yarn expo-doctor
