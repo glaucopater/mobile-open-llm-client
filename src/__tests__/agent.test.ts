@@ -172,4 +172,15 @@ describe('describeError', () => {
     expect(described.length).toBeLessThan(long.message.length);
     expect(describeError('plain string')).toContain('plain string');
   });
+
+  it('names a request that never reached the server instead of quoting fetch', () => {
+    // expo/fetch rejects with a bare "Failed to fetch" for DNS/TLS/dropped
+    // connections; the endpoint is shown beside it, so say what failed.
+    expect(describeError(new TypeError('Failed to fetch'))).toBe(
+      'network error · the request never reached the server (Failed to fetch)',
+    );
+    expect(describeError(new Error('Unable to resolve host'))).toContain('network error');
+    // An HTTP status is a response, not a transport failure.
+    expect(describeError({ statusCode: 502, message: 'Bad gateway' })).toBe('HTTP 502 · Bad gateway');
+  });
 });

@@ -79,6 +79,14 @@ export interface ConnectionTest {
   error?: string;
 }
 
+/**
+ * A request that never reached the server. `expo/fetch` rejects with a bare
+ * "Failed to fetch" for DNS, TLS and dropped connections, which tells the user
+ * nothing; the endpoint is printed next to it, so name the failure class here.
+ */
+const TRANSPORT_FAILURE =
+  /failed to fetch|network (request )?failed|connection (refused|reset|closed|timed out)|unable to resolve host|ssl|tls|handshake/i;
+
 /** Turns any failure into one line a settings screen can show. */
 export function describeError(error: unknown): string {
   if (error instanceof ContextOverflowError) {
@@ -87,9 +95,15 @@ export function describeError(error: unknown): string {
 
   // APICallError carries the HTTP status; duck-typed so this stays import-cheap.
   const apiError = error as { statusCode?: number; message?: string };
+  const raw = apiError.message ?? String(error);
+
+  if (apiError.statusCode === undefined && TRANSPORT_FAILURE.test(raw)) {
+    return elideText(`network error · the request never reached the server (${raw})`, 220);
+  }
+
   const status = typeof apiError.statusCode === 'number' ? `HTTP ${apiError.statusCode} · ` : '';
 
-  return elideText(status + (apiError.message ?? String(error)), 220);
+  return elideText(status + raw, 220);
 }
 
 export interface ConnectionTestOptions {

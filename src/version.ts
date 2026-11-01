@@ -8,5 +8,5 @@
 import icon from '../assets/icon.png';
 
 export const APP_NAME = 'Open LLM Client';
-export const APP_VERSION = '1.4.0';
+export const APP_VERSION = '1.5.0';
 export const APP_ICON = icon;

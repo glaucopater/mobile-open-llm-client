@@ -61,6 +61,16 @@ function webWrite(apiKeyRef: string, apiKey: string): void {
   }
 }
 
+/**
+ * Credentials travel inside an HTTP header, so anything a paste drags along that
+ * is not a printable ASCII character makes the request never leave the device:
+ * the native client rejects a header value containing a control character, and
+ * fetch surfaces that as a bare "Failed to fetch".
+ */
+export function normalizeApiKey(apiKey: string): string {
+  return apiKey.replace(/[^ -~]/g, '').trim();
+}
+
 export async function getApiKey(apiKeyRef?: string): Promise<string | undefined> {
   if (!apiKeyRef) {
     return undefined;
@@ -78,7 +88,9 @@ export async function getApiKey(apiKeyRef?: string): Promise<string | undefined>
   return value && value.length > 0 ? value : undefined;
 }
 
-export async function setApiKey(apiKeyRef: string, apiKey: string): Promise<void> {
+export async function setApiKey(apiKeyRef: string, rawApiKey: string): Promise<void> {
+  const apiKey = normalizeApiKey(rawApiKey);
+
   if (Platform.OS === 'web') {
     webWrite(apiKeyRef, apiKey);
 

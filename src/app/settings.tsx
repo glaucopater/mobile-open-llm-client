@@ -15,7 +15,7 @@ import {
   profileInputFromCatalog,
   searchCatalog,
 } from '../core/catalog-search';
-import { deleteApiKey, hasApiKey, primeKeyCache, setApiKey } from '../core/keys';
+import { deleteApiKey, hasApiKey, normalizeApiKey, primeKeyCache, setApiKey } from '../core/keys';
 import {
   dialectDefaultBaseUrl,
   endpointPreview,
@@ -406,7 +406,7 @@ function ModelEditor({
   };
 
   const runTest = async () => {
-    const typedKey = apiKey.trim();
+    const typedKey = normalizeApiKey(apiKey);
     const controller = new AbortController();
 
     abortRef.current = controller;
@@ -433,11 +433,11 @@ function ModelEditor({
   const saveKey = async () => {
     const ref = apiKeyRef.trim();
 
-    if (ref.length === 0 || apiKey.trim().length === 0) {
+    if (ref.length === 0 || normalizeApiKey(apiKey).length === 0) {
       return;
     }
 
-    await setApiKey(ref, apiKey.trim());
+    await setApiKey(ref, apiKey);
     await primeKeyCache([ref]);
     setKeyStored(true);
     setKey('');

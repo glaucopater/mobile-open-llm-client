@@ -223,6 +223,18 @@ src/
   gateway (`inference/openai/v1`), not the Go one. `generate-provider-catalog.mjs` lists both under
   `PAID_ONLY_MODELS`, so a preset added from the picker suggests a paid model instead of a free one that
   would answer `403`.
+- **Both Go endpoints reach the gateway from the phone**: measured on a device with a dummy credential,
+  `https://opencode.ai/inference/go/openai/v1/chat/completions` and `https://opencode.ai/zen/go/v1/chat/completions`
+  both answer `HTTP 401 · Upstream request failed: Invalid credential`, so neither is unreachable and neither
+  needs the other as a fallback. The documented endpoint for `deepseek-v4.1-flash` is
+  `inference/go/openai/v1/chat/completions` with `@ai-sdk/openai-compatible` (OpenCode's Go endpoint table), so the
+  default profile keeps that URL and the zen alias stays as the alternative. A bare `Failed to fetch` means the
+  request never left the device, not a wrong endpoint.
+- **Credential hygiene**: `normalizeApiKey` in `src/core/keys.ts` strips anything outside printable ASCII before
+  a key is stored or probed, because a header value containing a control character makes the native client refuse
+  the request and fetch reports that as a bare `Failed to fetch`. `describeError` names that class of failure
+  (`network error · the request never reached the server (...)`) instead of quoting fetch; an HTTP status is still
+  reported as `HTTP <code> · <message>` because a status is a response, not a transport failure.
 - **Built-in defaults reach installs that already saved a registry**: `load()` appends any `DEFAULT_MODELS`
   profile whose id is missing, keeping user rows in their own order and their edits intact, and stores
   `retiredDefaults` so a profile the user deleted is not resurrected. Web keeps the same row in
