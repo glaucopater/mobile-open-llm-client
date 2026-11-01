@@ -53,6 +53,32 @@ Limits found by running it, not assumed:
   verified on a real device; the web view verifies layout, contrast and round trips.
 - LAN Ollama works from the browser at http://localhost:11434/v1 (Ollama allows the
   localhost origin by default), streaming and reasoning included.
+- Dev-server memory: Metro crawls the project root to build its file map, so once
+  `expo prebuild` creates android/ the server walked 849 MB across 1301 files of Gradle
+  and CMake output on every start. Page requests hung and a long-lived server hit Node's
+  ~4 GB heap ceiling ("Reached heap limit Allocation failed"). metro.config.js sets
+  `resolver.blockList`, which Metro feeds to metro-file-map as the crawler's
+  `ignorePattern` (node_modules/metro/src/node-haste/DependencyGraph/createFileMap.js),
+  so android/, ios/, dist/, web-build/, .expo/ and .kotlin/ are never crawled. The pattern
+  is anchored to the project root, because bare `dist`/`build` names also match files
+  inside node_modules and would break real imports. Measured after the fix: /settings
+  answers at once, a web bundle is 8 MB in ~3.4s, and RSS stays 820-880 MB across six
+  invalidate-and-rebundle rounds — the growth was the crawl, not a leak, so no heap bump
+  is configured. (`env VAR=... cmd` is not a yarn builtin on Windows; set
+  `$env:NODE_OPTIONS` in PowerShell if headroom is ever needed.)
+  The fix was then checked against churn rather than only against startup: 1500 new files
+  written inside `android/` leave the bundle byte-identical (8,411,893 bytes) and served in
+  3.9s with Metro's RSS flat at ~857 MB, where the same churn cost a 434s bundle before the
+  blockList existed.
+- `scripts/web-ui-check.mjs` hung, then reported `mounted after 0 nodes`, for reasons
+  unrelated to the app: a leftover Edge from an earlier run keeps the shared profile
+  directory locked, and a second Edge on a locked profile never opens its debugging port.
+  Each run now gets its own profile dir and its own port (`9222 + pid % 400`), every CDP
+  round trip is bounded by `WEB_CHECK_TIMEOUT` (default 60s), Edge is killed with
+  `taskkill /T /F` so its children cannot hold the lock, and the mount count is reported as
+  both `#root` descendants and `body` children, so 0 can never be read as a successful
+  mount. Measured after the fix: `/settings` mounts 62 nodes, `/` mounts 85, and
+  `--click-text=Settings` navigates Chat to Settings.
 - Favicon: `app.json`'s `web.favicon` points at assets/favicon.png, and
   `npx expo export --platform web` converts it into a real multi-size favicon.ico
   (checked: ICO header 00 00 01 00, 3 entries at 16x16) plus
@@ -86,7 +112,7 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   (`mInputViewStarted`). The crash buffer (`logcat -b crash`) is checked last. Screenshots
   per check land in the temp dir. This is the only place the keyboard behaviour can be
   verified — react-native-web emits no keyboard events, and unit tests cannot see whether
-  a view sits behind the IME. Current run on the phone (v1.2.0, versionCode 3): 9/9.
+  a view sits behind the IME. Passed 9/9 on v1.2.0 (versionCode 3).
 - **Device e2e pitfalls, learned by running it**: a single fixed wait after a tap is too
   short, so checks poll the dump (`waitFor`) instead of sleeping once; `uiautomator` only
   reports nodes that are visible, so content below the fold needs a swipe (`scrollDown`,
@@ -97,6 +123,18 @@ yarn device:e2e    # node scripts/device-e2e.mjs — black-box checks on the ins
   leaves a notification that can leave the shade open, so `launch` broadcasts
   `CLOSE_SYSTEM_DIALOGS` and retries, otherwise `mCurrentFocus` stays `NotificationShade`
   and no check can see the app.
+- **More pitfalls from a run that failed 7/9 on v1.3.0**: an incoming WhatsApp message
+  expanded into the shade mid-run, so the dump read a chat transcript instead of the app and
+  the following tap landed in system UI — every check after it failed against the launcher.
+  Wireless adb (`mDNS TLS`) then dropped to `device offline` / `error: closed` and the
+  device vanished from `adb devices`, killing the run. `check()` now calls
+  `ensureForeground()` first (collapse the shade with `cmd statusbar collapse`, re-`am start`
+  until `mCurrentFocus` is ours), `adb()` retries through `wait-for-device`, and keyboard
+  checks go through `tapComposerUntilKeyboardUp()`: `ReactEditText` only summons the IME on
+  a click in touch mode (`requestFocusProgrammatically` checks `isInTouchMode`), so a tap
+  measured `mInputStarted=true` with `mShowInputRequested=false` and no keyboard until a
+  second tap followed, and a `KEYCODE_BACK` sent while the keyboard is down navigates out of
+  the app instead of hiding it.
 
 ## Architecture
 ```

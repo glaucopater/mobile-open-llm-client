@@ -10,11 +10,17 @@
  * screenshot of a phone-sized viewport so the UI can be reviewed without a
  * device.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
 const DEV_SERVER = process.env.WEB_CHECK_BASE ?? 'http://localhost:8081';
-const DEBUG_PORT = Number(process.env.WEB_CHECK_PORT ?? 9222);
+/**
+ * A per-run debugging port. Edge refuses to bind a port another (possibly
+ * still-alive) Edge instance already holds, and then never exposes the
+ * endpoint — an earlier run hung waiting on a port a leftover browser owned.
+ */
+const DEBUG_PORT = Number(process.env.WEB_CHECK_PORT ?? 9222 + (process.pid % 400));
 const VIEWPORT = { width: 393, height: 852, deviceScaleFactor: 2 };
 const EDGE_CANDIDATES = [
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -61,17 +67,24 @@ function findEdge(explicit) {
 
 /**
  * Launches Edge with a debugging port and waits for the endpoint to answer.
- * @returns {{ proc: import('node:child_process').ChildProcess, endpoint: string }}
+ * The profile directory is per run: a previous run's Edge children can survive
+ * `proc.kill()` and hold the profile lock, and a second Edge pointed at a
+ * locked profile never opens the debugging port — that is how a run hung.
+ * @returns {{ proc: import('node:child_process').ChildProcess, endpoint: string, profileDir: string }}
  */
 async function launchEdge(edgePath) {
-  const { spawn } = await import('node:child_process');
+  const profileDir = join(
+    process.env.TEMP ?? '/tmp',
+    `edge-profile-${DEBUG_PORT}-${process.pid}-${Date.now()}`,
+  );
+
   const proc = spawn(edgePath, [
     '--headless=new',
     '--no-sandbox',
     '--disable-gpu',
     '--remote-allow-origins=*',
     `--remote-debugging-port=${DEBUG_PORT}`,
-    `--user-data-dir=${join(process.env.TEMP ?? '/tmp', `edge-profile-${DEBUG_PORT}`)}`,
+    `--user-data-dir=${profileDir}`,
     '--hide-scrollbars',
   ]);
   proc.on('error', (error) => {
@@ -84,7 +97,7 @@ async function launchEdge(edgePath) {
     try {
       const response = await fetch(`${endpoint}/json/version`);
       if (response.ok) {
-        return { proc, endpoint };
+        return { proc, endpoint, profileDir };
       }
     } catch {
       // The port is not listening yet.
@@ -93,13 +106,40 @@ async function launchEdge(edgePath) {
     await sleep(250);
   }
 
-  proc.kill();
+  killTree(proc);
   throw new Error(`Edge debugging port ${DEBUG_PORT} never came up`);
+}
+
+/**
+ * Kills Edge and its children. `proc.kill()` only stops the browser process;
+ * renderer and GPU processes linger and keep the profile directory locked.
+ */
+function killTree(proc) {
+  if (!proc.pid) {
+    proc.kill();
+
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      proc.kill();
+    }
+
+    return;
+  }
+
+  proc.kill('SIGKILL');
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Every CDP round trip is bounded, so a page that never answers cannot hang. */
+const COMMAND_TIMEOUT = Number(process.env.WEB_CHECK_TIMEOUT ?? 60_000);
 
 /** Minimal CDP client: promise per command, console events collected. */
 async function connectPage(webSocketUrl) {
@@ -140,8 +180,16 @@ async function connectPage(webSocketUrl) {
   });
 
   await new Promise((resolve, reject) => {
-    socket.addEventListener('open', resolve);
-    socket.addEventListener('error', () => reject(new Error('CDP socket failed')));
+    const timer = setTimeout(() => reject(new Error('CDP socket never opened')), COMMAND_TIMEOUT);
+
+    socket.addEventListener('open', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.addEventListener('error', () => {
+      clearTimeout(timer);
+      reject(new Error('CDP socket failed'));
+    });
   });
 
   return {
@@ -150,7 +198,21 @@ async function connectPage(webSocketUrl) {
       const id = ++seq;
 
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`${method} did not answer within ${COMMAND_TIMEOUT}ms`));
+        }, COMMAND_TIMEOUT);
+
+        pending.set(id, {
+          resolve: (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        });
         socket.send(JSON.stringify({ id, method, params }));
       });
     },
@@ -226,18 +288,20 @@ if (!edge) {
   throw new Error('Microsoft Edge not found; pass --edge=<path to msedge.exe>');
 }
 
-const { proc, endpoint } = await launchEdge(edge);
+const { proc, endpoint, profileDir } = await launchEdge(edge);
 const targets = await (await fetch(`${endpoint}/json/list`)).json();
 const page = targets.find((target) => target.type === 'page');
 
 if (!page?.webSocketDebuggerUrl) {
-  proc.kill();
+  killTree(proc);
   throw new Error('no page target exposed by Edge');
 }
 
 const session = await connectPage(page.webSocketDebuggerUrl);
 
 try {
+  console.log(`route ${options.route}`);
+
   await session.command('Page.enable');
   await session.command('Runtime.enable');
   await session.command('Emulation.setDeviceMetricsOverride', { ...VIEWPORT, mobile: true });
@@ -247,7 +311,7 @@ try {
   // Wait for the app to mount (and for SQLite/SecureStore init to settle).
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const mounted = await session.evaluate(
-      `document.querySelector('#root')?.childElementCount ?? 0`,
+      `document.querySelector('#root')?.childElementCount ?? document.body.childElementCount`,
     );
 
     if (mounted > 0) {
@@ -286,8 +350,10 @@ try {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, Buffer.from(shot.data, 'base64'));
 
-  console.log(`route ${options.route}`);
-  console.log(`mounted after ${await session.evaluate(`document.querySelectorAll('#root *').length`)} nodes`);
+  const nodes = await session.evaluate(`document.querySelectorAll('#root *').length`);
+  const body = await session.evaluate(`document.body.childElementCount`);
+
+  console.log(`mounted: ${nodes} nodes under #root, ${body} children of body`);
   console.log(`screenshot ${path}`);
 
   if (session.logs.length > 0) {
@@ -296,5 +362,11 @@ try {
   }
 } finally {
   session.close();
-  proc.kill();
+  killTree(proc);
+
+  try {
+    rmSync(profileDir, { recursive: true, force: true });
+  } catch {
+    // Edge can still hold the profile open for a moment; a leftover temp dir is harmless.
+  }
 }

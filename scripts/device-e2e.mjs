@@ -55,14 +55,42 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * adb with transport recovery. Wireless adb (mDNS TLS) drops mid-run when the
+ * session expires, and the whole device disappears from `adb devices` — an
+ * early run died with `error: closed` / `device offline` after a notification
+ * stole the screen. `wait-for-device` blocks until the transport is back, so a
+ * short reconnect window covers a transient drop; a device that never returns
+ * is reported as what it is: wireless debugging off on the phone.
+ */
 function adb(...args) {
   const argv = options.device ? ['-s', options.device, ...args] : args;
+  const attempts = 3;
 
-  try {
-    return execFileSync('adb', argv, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim();
-  } catch (error) {
-    throw new Error(`adb ${args.join(' ')} failed: ${error.stderr ?? error.message}`);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return execFileSync('adb', argv, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }).trim();
+    } catch (error) {
+      const detail = error.stderr ?? error.message;
+
+      if (attempt === attempts || !/device offline|error: closed|no devices|connection/i.test(detail)) {
+        throw new Error(`adb ${args.join(' ')} failed: ${detail}`);
+      }
+
+      try {
+        execFileSync('adb', [...argv.slice(0, 2), 'wait-for-device'], {
+          encoding: 'utf8',
+          timeout: 20_000,
+        });
+      } catch {
+        throw new Error(
+          `adb lost the device (${detail}). Re-enable Wireless debugging on the phone (Developer options) and re-run.`,
+        );
+      }
+    }
   }
+
+  return '';
 }
 
 /** Runs a shell command on the device, filtered on-device to keep the payload small. */
@@ -153,6 +181,29 @@ function focus() {
  */
 function closeSystemDialogs() {
   sh('am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS');
+  // The shade can also be open on its own; collapsing it is the only way to put
+  // the app back on screen without restarting it.
+  sh('cmd statusbar collapse');
+}
+
+/**
+ * Puts the app back on screen before every check. Incoming notifications expand
+ * into the shade and take focus: one run read a WhatsApp conversation instead
+ * of the composer, then tapped into the shade and lost the device. `am start`
+ * on the already-running task brings it forward without losing state.
+ */
+async function ensureForeground() {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (focus().includes(options.pkg)) {
+      return;
+    }
+
+    closeSystemDialogs();
+    sh(`am start -n ${LAUNCH}`);
+    await sleep(600);
+  }
+
+  throw new Error(`app is not on screen: ${focus()}`);
 }
 
 async function launch() {
@@ -258,6 +309,7 @@ async function check(name, body) {
   }
 
   try {
+    await ensureForeground();
     const detail = await body();
     results.push({ name, ok: true, detail });
     console.log(`PASS ${name} — ${detail}`);
@@ -306,6 +358,29 @@ async function awaitKeyboard(shows = true) {
   }
 
   return keyboardState();
+}
+
+/**
+ * Taps the composer until the IME is up. ReactEditText only summons the
+ * keyboard when the view is clickable in touch mode (`isInTouchMode`), so a
+ * tap that lands right after an adb keyevent focuses the field without
+ * showing the keyboard — measured as `mInputStarted=true` with
+ * `mShowInputRequested=false`. A second tap behaves like a real user.
+ */
+async function tapComposerUntilKeyboardUp() {
+  let keyboard = await awaitKeyboard(false);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await ensureForeground();
+    await tap(center(pick(dumpUi(), 'Message')));
+    keyboard = await awaitKeyboard(true);
+
+    if (keyboard.visible) {
+      return keyboard;
+    }
+  }
+
+  return keyboard;
 }
 
 /** Navigates to Settings if not already there, so `--only=` runs stand alone. */
@@ -391,11 +466,7 @@ async function main() {
   });
 
   await check('keyboard-composer', async () => {
-    const before = pick(dumpUi(), 'Message');
-    const point = center(before);
-    await tap(point.x, point.y);
-
-    const keyboard = await awaitKeyboard(true);
+    const keyboard = await tapComposerUntilKeyboardUp();
 
     if (!keyboard.visible) {
       throw new Error('keyboard never appeared after tapping the composer');
@@ -426,6 +497,9 @@ async function main() {
   });
 
   await check('keyboard-typing', async () => {
+    // Standalone runs (`--only=keyboard`) start with the keyboard down.
+    await tapComposerUntilKeyboardUp();
+
     const typed = 'hello world';
     sh(`input text "${typed.replace(/ /g, '%s')}"`);
     await sleep(options.wait);
@@ -440,6 +514,10 @@ async function main() {
   });
 
   await check('keyboard-hide', async () => {
+    // BACK dismisses the keyboard. With the keyboard down it navigates back
+    // instead and leaves the app, so the keyboard has to be up first — an
+    // earlier run exited the app and every later check read the launcher.
+    await tapComposerUntilKeyboardUp();
     sh('input keyevent KEYCODE_BACK');
     const keyboard = await awaitKeyboard(false);
 
